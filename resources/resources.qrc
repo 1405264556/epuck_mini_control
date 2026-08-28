@@ -1,0 +1,14 @@
+<RCC>
+    <qresource prefix="/">
+        <file>styles/default.qss</file>
+        <file>icons/app_icon.ico</file>
+        <file>icons/robot.svg</file>
+        <file>icons/connect.svg</file>
+        <file>icons/disconnect.svg</file>
+        <file>icons/flash.svg</file>
+        <file>icons/formation.svg</file>
+        <file>icons/play.svg</file>
+        <file>icons/stop.svg</file>
+        <file>icons/settings.svg</file>
+    </qresource>
+</RCC>

@@ -1,0 +1,45 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "mingw-debug",
+      "displayName": "MinGW x64 Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/mingw-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_PREFIX_PATH": "F:/Qt/6.10.3/mingw_64;F:/Tools/eigen-install;F:/Tools/googletest",
+        "CMAKE_C_COMPILER": "F:/Tools/mingw64/mingw64/bin/gcc.exe",
+        "CMAKE_CXX_COMPILER": "F:/Tools/mingw64/mingw64/bin/g++.exe"
+      }
+    },
+    {
+      "name": "mingw-release",
+      "displayName": "MinGW x64 Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/mingw-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_PREFIX_PATH": "F:/Qt/6.10.3/mingw_64;F:/Tools/eigen-install;F:/Tools/googletest",
+        "CMAKE_C_COMPILER": "F:/Tools/mingw64/mingw64/bin/gcc.exe",
+        "CMAKE_CXX_COMPILER": "F:/Tools/mingw64/mingw64/bin/g++.exe"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "mingw-debug",
+      "configurePreset": "mingw-debug",
+      "environment": {
+        "PATH": "F:/Qt/6.10.3/mingw_64/bin;F:/Tools/mingw64/mingw64/bin;$penv{PATH}"
+      }
+    },
+    {
+      "name": "mingw-release",
+      "configurePreset": "mingw-release",
+      "environment": {
+        "PATH": "F:/Qt/6.10.3/mingw_64/bin;F:/Tools/mingw64/mingw64/bin;$penv{PATH}"
+      }
+    }
+  ]
+}

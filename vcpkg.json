@@ -1,0 +1,14 @@
+{
+  "name": "epuck-mini-control",
+  "version": "0.1.0",
+  "description": "Host PC control software for e-puck Mini educational robots",
+  "dependencies": [
+    {
+      "name": "qt6",
+      "features": ["bluetooth", "serialport", "charts"]
+    },
+    "eigen3",
+    "libusb",
+    "gtest"
+  ]
+}
