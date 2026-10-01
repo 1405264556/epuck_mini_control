@@ -1,8 +1,7 @@
 #include "MultiRobotDriveWidget.h"
-
 #include "core/RobotInstance.h"
 #include "core/RobotManager.h"
-
+#include "control/MultiRobotCoordinator.h"
 #include <QCheckBox>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -13,100 +12,114 @@
 #include <QSpinBox>
 #include <QStyle>
 #include <QTableWidget>
-#include <QVBoxLayout>
+#include <QTimer>
+#include <QDateTime>
+#include <QHideEvent>
+#include <QSignalBlocker>
 
-MultiRobotDriveWidget::MultiRobotDriveWidget(RobotManager *robotManager, QWidget *parent)
-    : QWidget(parent), m_robotManager(robotManager)
+MultiRobotDriveWidget::MultiRobotDriveWidget(RobotManager *manager, MultiRobotCoordinator *coordinator, QWidget *parent)
+    : QWidget(parent), m_robotManager(manager), m_coordinator(coordinator)
 {
-    auto *layout = new QVBoxLayout(this);
+    auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(4, 4, 4, 4);
-
-    auto *groupBox = new QGroupBox("多机器人同步控制");
-    auto *groupLayout = new QGridLayout(groupBox);
-    groupLayout->addWidget(createValueControl("前进速度", &m_linearSlider, &m_linearSpin,
-                                               -1000, 1000, 500), 0, 0, 1, 5);
-    groupLayout->addWidget(createValueControl("转向量", &m_turnSlider, &m_turnSpin,
-                                               -1000, 1000, 350), 1, 0, 1, 5);
-
-    auto *forwardButton = new QPushButton;
-    auto *backButton = new QPushButton;
-    auto *leftButton = new QPushButton;
-    auto *rightButton = new QPushButton;
-    auto *sendButton = new QPushButton("应用数值");
-    auto *stopButton = new QPushButton;
-
-    forwardButton->setIcon(style()->standardIcon(QStyle::SP_ArrowUp));
-    backButton->setIcon(style()->standardIcon(QStyle::SP_ArrowDown));
-    leftButton->setIcon(style()->standardIcon(QStyle::SP_ArrowLeft));
-    rightButton->setIcon(style()->standardIcon(QStyle::SP_ArrowRight));
-    stopButton->setIcon(style()->standardIcon(QStyle::SP_MediaStop));
-    forwardButton->setToolTip("按住：选中机器人前进");
-    backButton->setToolTip("按住：选中机器人后退");
-    leftButton->setToolTip("按住：选中机器人原地左转");
-    rightButton->setToolTip("按住：选中机器人原地右转");
-    stopButton->setToolTip("停止所有勾选的机器人");
-
-    groupLayout->addWidget(leftButton, 2, 0);
-    groupLayout->addWidget(forwardButton, 2, 1);
-    groupLayout->addWidget(backButton, 2, 2);
-    groupLayout->addWidget(rightButton, 2, 3);
-    groupLayout->addWidget(stopButton, 2, 4);
-    groupLayout->addWidget(sendButton, 3, 0, 1, 5);
-    layout->addWidget(groupBox);
-
-    auto *individualBox = new QGroupBox("单机器人分控");
-    auto *individualLayout = new QVBoxLayout(individualBox);
-    m_robotTable = new QTableWidget(0, 7);
-    m_robotTable->setHorizontalHeaderLabels(
-        {"同步", "机器人", "状态", "左轮", "右轮", "应用", "停止"});
-    m_robotTable->verticalHeader()->setVisible(false);
+    auto *group = new QGroupBox("同步控制");
+    group->setMaximumWidth(310);
+    auto *controls = new QGridLayout(group);
+    controls->setContentsMargins(8, 8, 8, 8);
+    controls->setVerticalSpacing(4);
+    controls->addWidget(createValueControl("速度", &m_linearSlider, &m_linearSpin, -1000, 1000, 300), 0, 0, 1, 5);
+    controls->addWidget(createValueControl("转向", &m_turnSlider, &m_turnSpin, -1000, 1000, 0), 1, 0, 1, 5);
+    const QList<QStyle::StandardPixmap> icons{QStyle::SP_ArrowLeft, QStyle::SP_ArrowUp,
+        QStyle::SP_ArrowDown, QStyle::SP_ArrowRight, QStyle::SP_MediaStop};
+    const QStringList tips{"左转", "前进", "后退", "右转", "停止同步组"};
+    for (int i = 0; i < 5; ++i) {
+        auto *button = new QPushButton;
+        button->setIcon(style()->standardIcon(icons[i]));
+        button->setToolTip(tips[i]);
+        button->setAccessibleName(tips[i]);
+        button->setMinimumSize(36, 32);
+        controls->addWidget(button, 2, i);
+        if (i == 4) {
+            connect(button, &QPushButton::clicked, this, &MultiRobotDriveWidget::stopSelectedRobots);
+        } else {
+            connect(button, &QPushButton::pressed, this, [this, i]() {
+                m_heldTargets = selectedRobotIds();
+                const int speed = qAbs(m_linearSpin->value());
+                const int turn = qMax(100, qAbs(m_turnSpin->value()));
+                sendGroupMotion(i == 1 ? speed : i == 2 ? -speed : 0, i == 0 ? -turn : i == 3 ? turn : 0);
+            });
+            connect(button, &QPushButton::released, this, [this]() {
+                QMap<RobotId, WheelSpeeds> stops;
+                for (const auto &id : m_heldTargets) { stops[id] = {}; m_activeCommands.remove(id); }
+                m_heldTargets.clear();
+                dispatch(stops);
+            });
+        }
+    }
+    auto *apply = new QPushButton("应用到同步组");
+    apply->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
+    apply->setObjectName("applyFleetCommand");
+    controls->addWidget(apply, 3, 0, 1, 5);
+    connect(apply, &QPushButton::clicked, this, &MultiRobotDriveWidget::sendGroupValues);
+    auto *all = new QCheckBox("选择全部在线设备");
+    all->setChecked(true);
+    controls->addWidget(all, 4, 0, 1, 5);
+    m_groupStatus = new QLabel;
+    m_groupStatus->setMinimumHeight(18);
+    controls->addWidget(m_groupStatus, 5, 0, 1, 5);
+    controls->setRowStretch(6, 1);
+    layout->addWidget(group);
+    m_robotTable = new QTableWidget(0, 8);
+    m_robotTable->setObjectName("fleetDriveTable");
+    m_robotTable->setHorizontalHeaderLabels({"同步", "设备", "数据时效", "左轮", "右轮", "已下发", "", ""});
+    m_robotTable->verticalHeader()->setDefaultSectionSize(36);
     m_robotTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_robotTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_robotTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_robotTable->setAlternatingRowColors(true);
-    m_robotTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_robotTable->horizontalHeader()->setMinimumSectionSize(34);
+    for (int i = 0; i < 8; ++i) m_robotTable->horizontalHeader()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
     m_robotTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    m_robotTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_robotTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-    m_robotTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
-    m_robotTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
-    m_robotTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
-    individualLayout->addWidget(m_robotTable);
-    layout->addWidget(individualBox, 1);
-
-    auto pressMotion = [this](QPushButton *button, int linear, int turn) {
-        connect(button, &QPushButton::pressed, this, [this, linear, turn]() {
-            const int speed = qMax(100, qAbs(m_linearSpin->value()));
-            const int steering = qMax(100, qAbs(m_turnSpin->value()));
-            sendGroupMotion(linear * speed, turn * steering);
-        });
-        connect(button, &QPushButton::released, this, &MultiRobotDriveWidget::stopSelectedRobots);
-    };
-    pressMotion(forwardButton, 1, 0);
-    pressMotion(backButton, -1, 0);
-    pressMotion(leftButton, 0, -1);
-    pressMotion(rightButton, 0, 1);
-    connect(sendButton, &QPushButton::clicked, this, &MultiRobotDriveWidget::sendGroupValues);
-    connect(stopButton, &QPushButton::clicked, this, &MultiRobotDriveWidget::stopSelectedRobots);
-
-    connect(m_robotManager, &RobotManager::robotAdded,
-            this, [this](const RobotId &) { rebuildRobotRows(); });
-    connect(m_robotManager, &RobotManager::robotRemoved,
-            this, [this](const RobotId &) { rebuildRobotRows(); });
-    connect(m_robotManager, &RobotManager::robotConnectionStateChanged,
-            this, [this](const RobotId &, RobotConnectionState) { rebuildRobotRows(); });
+    for (int column : {3, 4, 5, 6, 7}) {
+        m_robotTable->horizontalHeader()->setSectionResizeMode(column, QHeaderView::Fixed);
+        m_robotTable->setColumnWidth(column, column <= 4 ? 100 : column == 5 ? 110 : 42);
+    }
+    layout->addWidget(m_robotTable, 1);
+    connect(all, &QCheckBox::toggled, this, [this](bool checked) {
+        for (int row = 0; row < m_robotTable->rowCount(); ++row)
+            m_robotTable->cellWidget(row, 0)->findChild<QCheckBox *>()->setChecked(checked);
+    });
+    connect(m_robotTable, &QTableWidget::cellClicked, this, [this](int row, int) {
+        m_robotManager->setSelectedRobot(m_robotTable->item(row, 1)->data(Qt::UserRole).toString());
+    });
+    connect(manager, &RobotManager::robotAdded, this, [this](const RobotId &) { rebuildRobotRows(); });
+    connect(manager, &RobotManager::robotRemoved, this, [this](const RobotId &id) {
+        m_activeCommands.remove(id); rebuildRobotRows();
+    });
+    connect(manager, &RobotManager::robotConnectionStateChanged, this, [this](const RobotId &id, RobotConnectionState state) {
+        if (state != RobotConnectionState::Connected) m_activeCommands.remove(id);
+        refreshRows();
+    });
+    if (coordinator) connect(coordinator, &MultiRobotCoordinator::coordinationStarted, this, [this]() {
+        m_activeCommands.clear(); m_heldTargets.clear();
+    });
+    m_heartbeat = new QTimer(this);
+    m_heartbeat->setInterval(100);
+    connect(m_heartbeat, &QTimer::timeout, this, [this]() {
+        if (isVisible() && !m_activeCommands.isEmpty()) dispatch(m_activeCommands);
+        refreshRows();
+    });
+    m_heartbeat->start();
     rebuildRobotRows();
 }
 
 QWidget *MultiRobotDriveWidget::createValueControl(const QString &label, QSlider **slider,
-                                                   QSpinBox **spin, int minimum,
-                                                   int maximum, int value) {
+                                                  QSpinBox **spin, int minimum, int maximum, int value) {
     auto *widget = new QWidget;
     auto *layout = new QGridLayout(widget);
     layout->setContentsMargins(0, 0, 0, 0);
-
     *slider = new QSlider(Qt::Horizontal);
     (*slider)->setRange(minimum, maximum);
-    (*slider)->setSingleStep(25);
-    (*slider)->setPageStep(100);
     (*slider)->setValue(value);
     *spin = new QSpinBox;
     (*spin)->setRange(minimum, maximum);
@@ -114,132 +127,151 @@ QWidget *MultiRobotDriveWidget::createValueControl(const QString &label, QSlider
     (*spin)->setAccelerated(true);
     (*spin)->setKeyboardTracking(false);
     (*spin)->setValue(value);
-    (*spin)->setSuffix(" step/s");
-
+    (*spin)->setToolTip("步 / 秒，范围 -1000 到 1000");
+    (*spin)->setFixedWidth(82);
     layout->addWidget(new QLabel(label), 0, 0);
     layout->addWidget(*slider, 0, 1);
     layout->addWidget(*spin, 0, 2);
+    layout->setColumnStretch(1, 1);
     connect(*slider, &QSlider::valueChanged, *spin, &QSpinBox::setValue);
     connect(*spin, QOverload<int>::of(&QSpinBox::valueChanged), *slider, &QSlider::setValue);
     return widget;
 }
 
 void MultiRobotDriveWidget::rebuildRobotRows() {
-    QMap<RobotId, QList<int>> previousValues;
+    QMap<RobotId, QList<int>> saved;
     for (int row = 0; row < m_robotTable->rowCount(); ++row) {
-        auto *nameItem = m_robotTable->item(row, 1);
-        auto *checkContainer = m_robotTable->cellWidget(row, 0);
-        auto *check = checkContainer ? checkContainer->findChild<QCheckBox *>() : nullptr;
-        auto *left = qobject_cast<QSpinBox *>(m_robotTable->cellWidget(row, 3));
-        auto *right = qobject_cast<QSpinBox *>(m_robotTable->cellWidget(row, 4));
-        if (nameItem && check && left && right) {
-            previousValues[nameItem->data(Qt::UserRole).toString()] = {
-                check->isChecked() ? 1 : 0, left->value(), right->value()};
-        }
+        const auto id = m_robotTable->item(row, 1)->data(Qt::UserRole).toString();
+        saved[id] = {m_robotTable->cellWidget(row, 0)->findChild<QCheckBox *>()->isChecked() ? 1 : 0,
+            qobject_cast<QSpinBox *>(m_robotTable->cellWidget(row, 3))->value(),
+            qobject_cast<QSpinBox *>(m_robotTable->cellWidget(row, 4))->value()};
     }
     m_robotTable->setRowCount(0);
-    const auto robots = m_robotManager->allRobots();
-    for (auto *robot : robots) {
+    for (auto *robot : m_robotManager->allRobots()) {
+        const RobotId id = robot->id();
         const int row = m_robotTable->rowCount();
         m_robotTable->insertRow(row);
-        const bool connected = robot->state() == RobotConnectionState::Connected;
-
-        auto *selected = new QCheckBox;
-        const auto saved = previousValues.value(robot->id());
-        selected->setChecked(connected && (saved.isEmpty() || saved.value(0) != 0));
-        selected->setEnabled(connected);
-        selected->setProperty("robotId", robot->id());
-        auto *checkContainer = new QWidget;
-        auto *checkLayout = new QVBoxLayout(checkContainer);
-        checkLayout->setContentsMargins(0, 0, 0, 0);
-        checkLayout->setAlignment(Qt::AlignCenter);
-        checkLayout->addWidget(selected);
-        m_robotTable->setCellWidget(row, 0, checkContainer);
-
-        auto *nameItem = new QTableWidgetItem(robot->name().isEmpty() ? robot->id() : robot->name());
-        nameItem->setData(Qt::UserRole, robot->id());
-        m_robotTable->setItem(row, 1, nameItem);
-        m_robotTable->setItem(row, 2, new QTableWidgetItem(stateText(robot->state())));
-
-        auto *leftSpin = new QSpinBox;
-        auto *rightSpin = new QSpinBox;
-        for (auto *spin : {leftSpin, rightSpin}) {
+        auto *check = new QCheckBox;
+        check->setChecked(!saved.contains(id) || saved[id][0]);
+        check->setProperty("robotId", id);
+        auto *container = new QWidget;
+        auto *box = new QHBoxLayout(container);
+        box->setContentsMargins(0, 0, 0, 0);
+        box->setAlignment(Qt::AlignCenter);
+        box->addWidget(check);
+        m_robotTable->setCellWidget(row, 0, container);
+        auto *name = new QTableWidgetItem(robot->deviceInfo().portName.isEmpty() ? id : robot->deviceInfo().portName);
+        name->setData(Qt::UserRole, id);
+        name->setToolTip(robot->name());
+        m_robotTable->setItem(row, 1, name);
+        m_robotTable->setItem(row, 2, new QTableWidgetItem);
+        m_robotTable->setItem(row, 5, new QTableWidgetItem);
+        for (int col : {3, 4}) {
+            auto *spin = new QSpinBox;
             spin->setRange(-1000, 1000);
             spin->setSingleStep(25);
-            spin->setAccelerated(true);
             spin->setKeyboardTracking(false);
-            spin->setEnabled(connected);
-            spin->setSuffix(" step/s");
+            spin->setAccelerated(true);
+            spin->setMinimumWidth(76);
+            spin->setValue(saved.value(id).value(col - 2));
+            spin->setToolTip("步 / 秒");
+            m_robotTable->setCellWidget(row, col, spin);
         }
-        if (saved.size() >= 3) {
-            leftSpin->setValue(saved[1]);
-            rightSpin->setValue(saved[2]);
+        for (int col : {6, 7}) {
+            auto *button = new QPushButton;
+            button->setIcon(style()->standardIcon(col == 6 ? QStyle::SP_DialogApplyButton : QStyle::SP_MediaStop));
+            button->setToolTip(col == 6 ? "应用该设备轮速" : "停止该设备");
+            button->setAccessibleName(button->toolTip());
+            m_robotTable->setCellWidget(row, col, button);
+            connect(button, &QPushButton::clicked, this, [this, id, row, col]() {
+                auto *left = qobject_cast<QSpinBox *>(m_robotTable->cellWidget(row, 3));
+                auto *right = qobject_cast<QSpinBox *>(m_robotTable->cellWidget(row, 4));
+                if (col == 7) { left->setValue(0); right->setValue(0); }
+                m_robotManager->setSelectedRobot(id);
+                sendWheelValues(id, left->value(), right->value());
+            });
         }
-        m_robotTable->setCellWidget(row, 3, leftSpin);
-        m_robotTable->setCellWidget(row, 4, rightSpin);
-
-        auto *applyButton = new QPushButton;
-        applyButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
-        applyButton->setToolTip("发送该机器人的左右轮数值");
-        applyButton->setEnabled(connected);
-        auto *stopButton = new QPushButton;
-        stopButton->setIcon(style()->standardIcon(QStyle::SP_MediaStop));
-        stopButton->setToolTip("停止该机器人");
-        stopButton->setEnabled(connected);
-        m_robotTable->setCellWidget(row, 5, applyButton);
-        m_robotTable->setCellWidget(row, 6, stopButton);
-
-        const RobotId id = robot->id();
-        connect(applyButton, &QPushButton::clicked, this, [this, id, leftSpin, rightSpin]() {
-            sendWheelValues(id, leftSpin->value(), rightSpin->value());
-        });
-        connect(stopButton, &QPushButton::clicked, this, [this, id, leftSpin, rightSpin]() {
-            leftSpin->setValue(0);
-            rightSpin->setValue(0);
-            sendWheelValues(id, 0, 0);
+        connect(check, &QCheckBox::toggled, this, [this, id](bool checked) {
+            if (!checked && m_activeCommands.contains(id)) {
+                m_activeCommands.remove(id);
+                dispatch({{id, {}}});
+            }
+            refreshRows();
         });
     }
+    refreshRows();
+}
+
+void MultiRobotDriveWidget::refreshRows() {
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    for (int row = 0; row < m_robotTable->rowCount(); ++row) {
+        auto *r = m_robotManager->robot(m_robotTable->item(row, 1)->data(Qt::UserRole).toString());
+        if (!r) continue;
+        const bool online = r->state() == RobotConnectionState::Connected;
+        m_robotTable->cellWidget(row, 0)->findChild<QCheckBox *>()->setEnabled(online);
+        for (int col : {3, 4, 6, 7}) m_robotTable->cellWidget(row, col)->setEnabled(online);
+        const auto &data = r->latestSensorData();
+        m_robotTable->item(row, 2)->setText(online && data.timestamp
+            ? QString::number(qMax<qint64>(0, now-data.timestamp)) + " ms" : stateText(r->state()));
+        m_robotTable->item(row, 2)->setForeground(online && data.isFresh(SensorData::Proximity, now)
+            ? QColor("#087f72") : QColor("#a85d22"));
+        const auto speeds = r->commandedSpeeds();
+        m_robotTable->item(row, 5)->setText(QString("%1 / %2").arg(qRound(speeds.left*1000)).arg(qRound(speeds.right*1000)));
+    }
+    m_groupStatus->setText(QString("同步组 %1 台 · 在线 %2 台").arg(selectedRobotIds().size()).arg(m_robotManager->connectedRobots().size()));
 }
 
 QList<RobotId> MultiRobotDriveWidget::selectedRobotIds() const {
     QList<RobotId> ids;
     for (int row = 0; row < m_robotTable->rowCount(); ++row) {
-        auto *container = m_robotTable->cellWidget(row, 0);
-        auto *check = container ? container->findChild<QCheckBox *>() : nullptr;
-        if (check && check->isChecked() && check->isEnabled()) {
-            ids.append(check->property("robotId").toString());
-        }
+        auto *check = m_robotTable->cellWidget(row, 0)->findChild<QCheckBox *>();
+        if (check->isChecked() && check->isEnabled()) ids.append(check->property("robotId").toString());
     }
     return ids;
 }
 
-void MultiRobotDriveWidget::sendGroupValues() {
-    sendGroupMotion(m_linearSpin->value(), m_turnSpin->value());
+void MultiRobotDriveWidget::dispatch(const QMap<RobotId, WheelSpeeds> &commands) {
+    if (m_coordinator && !commands.isEmpty()) m_coordinator->manualDrive(commands);
 }
 
+void MultiRobotDriveWidget::sendGroupValues() { sendGroupMotion(m_linearSpin->value(), m_turnSpin->value()); }
 void MultiRobotDriveWidget::sendGroupMotion(int linear, int turn) {
-    const int left = qBound(-1000, linear + turn, 1000);
-    const int right = qBound(-1000, linear - turn, 1000);
-    for (const auto &id : selectedRobotIds()) sendWheelValues(id, left, right);
+    QMap<RobotId, WheelSpeeds> commands;
+    for (const auto &id : selectedRobotIds()) {
+        const WheelSpeeds speeds{qBound(-1.0, (linear + turn) / 1000.0, 1.0),
+                                 qBound(-1.0, (linear - turn) / 1000.0, 1.0)};
+        commands[id] = speeds;
+        m_activeCommands[id] = speeds;
+    }
+    dispatch(commands);
 }
-
 void MultiRobotDriveWidget::stopSelectedRobots() {
-    for (const auto &id : selectedRobotIds()) sendWheelValues(id, 0, 0);
+    QMap<RobotId, WheelSpeeds> commands;
+    for (const auto &id : selectedRobotIds()) { commands[id] = {}; m_activeCommands.remove(id); }
+    dispatch(commands);
 }
-
+void MultiRobotDriveWidget::stopManualControl() {
+    QMap<RobotId, WheelSpeeds> commands;
+    for (auto it = m_activeCommands.cbegin(); it != m_activeCommands.cend(); ++it) commands[it.key()] = {};
+    m_activeCommands.clear();
+    m_heldTargets.clear();
+    dispatch(commands);
+}
+void MultiRobotDriveWidget::hideEvent(QHideEvent *event) { stopManualControl(); QWidget::hideEvent(event); }
 void MultiRobotDriveWidget::sendWheelValues(const RobotId &id, int left, int right) {
     auto *robot = m_robotManager->robot(id);
     if (!robot || robot->state() != RobotConnectionState::Connected) return;
-    robot->setMotorSpeeds(left / 1000.0, right / 1000.0);
+    const WheelSpeeds speeds{left/1000.0, right/1000.0};
+    if (left || right) m_activeCommands[id] = speeds; else m_activeCommands.remove(id);
+    dispatch({{id, speeds}});
 }
-
 QString MultiRobotDriveWidget::stateText(RobotConnectionState state) const {
     switch (state) {
     case RobotConnectionState::Connecting: return "连接中";
-    case RobotConnectionState::Connected: return "在线";
+    case RobotConnectionState::Connected: return "等待数据";
     case RobotConnectionState::Disconnecting: return "断开中";
     case RobotConnectionState::Error: return "异常";
     case RobotConnectionState::Disconnected: return "离线";
     }
-    return "未知";
+    return "--";
 }

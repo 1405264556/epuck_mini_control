@@ -18,10 +18,13 @@ public:
     RobotConnectionState state() const { return m_state; }
     const SensorData &latestSensorData() const { return m_latestSensorData; }
     const BLEDeviceInfo &deviceInfo() const { return m_deviceInfo; }
+    void updateDeviceInfo(const BLEDeviceInfo &info) { m_deviceInfo = info; m_name = info.friendlyName; }
 
     // Position estimation (from odometry or user-set)
     Vec2 position() const { return m_position; }
     double heading() const { return m_heading; }
+    WheelSpeeds commandedSpeeds() const { return m_commandedSpeeds; }
+    void recordMotorCommand(double left, double right);
     void setPosition(const Vec2 &pos, double hdg);
 
     // Serial communication
@@ -52,6 +55,9 @@ private:
     SensorData m_latestSensorData;
     Vec2 m_position;
     double m_heading = 0.0;
+    WheelSpeeds m_commandedSpeeds;
+    bool m_haveEncoders = false;
+    std::array<int16_t, 2> m_previousEncoders = {};
 
     SerialManager *m_serialManager = nullptr;
 

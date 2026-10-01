@@ -43,7 +43,9 @@ void FlockingController::update(double dt) {
                 // Separation: steer away from nearby neighbors (inverse distance)
                 separation = separation + diff.normalized() * (1.0 / std::max(dist, 0.1));
                 // Alignment: steer toward average velocity of neighbors
-                alignment = alignment + other->position() - pos; // approximate velocity from inter-robot
+                const auto speeds = other->commandedSpeeds();
+                alignment += Vec2(std::cos(other->heading()), std::sin(other->heading()))
+                    * ((speeds.left + speeds.right) * 6.44);
                 // Cohesion: steer toward center of neighbors
                 cohesion = cohesion + other->position();
                 neighborCount++;
@@ -58,9 +60,7 @@ void FlockingController::update(double dt) {
         }
 
         // Goal seeking
-        if (m_goalPosition.lengthSquared() > 0.01) {
-            goalSteer = (m_goalPosition - pos).normalized();
-        }
+        goalSteer = (m_goalPosition - pos).normalized();
 
         // Weighted combination
         Vec2 desiredVel = separation * m_separationWeight
@@ -86,11 +86,13 @@ void FlockingController::update(double dt) {
         if (linearVel > 0.01) {
             Vec2 heading(cos(r->heading()), sin(r->heading()));
             double angleError = atan2(vel.y, vel.x) - atan2(heading.y, heading.x);
-            angularVel = math::normalizeAngle(angleError) * 2.0; // P controller for heading
+            const double error = math::normalizeAngle(angleError);
+            angularVel = error * 2.0;
+            linearVel *= qMax(0.0, std::cos(error));
         }
         auto ws = math::unicycleToWheelSpeeds(
             math::clamp(linearVel, -m_maxSpeed, m_maxSpeed),
-            math::clamp(angularVel, -4.0, 4.0), 2.0, 5.0);
+            math::clamp(angularVel, -4.0, 4.0), 12.88, 5.3);
         wheelSpeeds[r->id()] = ws;
     }
 

@@ -65,7 +65,10 @@ RobotListWidget::RobotListWidget(RobotManager *robotMgr, SerialManager *serialMg
     });
     connect(m_disconnectAllBtn, &QPushButton::clicked, this, [this]() {
         QList<RobotId> ids;
-        for (auto *robot : m_robotManager->connectedRobots()) ids.append(robot->id());
+        for (auto *robot : m_robotManager->allRobots()) {
+            if (robot->state() == RobotConnectionState::Connected || robot->state() == RobotConnectionState::Connecting)
+                ids.append(robot->id());
+        }
         if (!ids.isEmpty()) emit disconnectAllRequested(ids);
     });
     connect(m_listView->selectionModel(), &QItemSelectionModel::currentChanged,
@@ -95,7 +98,8 @@ RobotListWidget::RobotListWidget(RobotManager *robotMgr, SerialManager *serialMg
                 refreshButtons();
             });
     connect(m_serialManager, &SerialManager::scanStarted, this, [this]() {
-        m_scanBtn->setEnabled(false);
+        m_scanBtn->setEnabled(true);
+        m_scanBtn->setText("停止扫描");
         m_scanProgress->setRange(0, 0);
         m_scanProgress->setFormat("正在枚举端口...");
         m_scanProgress->setVisible(true);
@@ -109,13 +113,21 @@ RobotListWidget::RobotListWidget(RobotManager *robotMgr, SerialManager *serialMg
     });
     connect(m_serialManager, &SerialManager::scanFinished, this, [this]() {
         m_scanBtn->setEnabled(true);
+        m_scanBtn->setText("扫描 COM 端口");
         m_scanProgress->setVisible(false);
         refreshButtons();
     });
+    connect(m_robotManager, &RobotManager::selectedRobotChanged, this, [this](const RobotId &id) {
+        for (int row = 0; row < m_model->rowCount({}); ++row) {
+            if (m_model->robotIdAt(row) == id) { m_listView->setCurrentIndex(m_model->index(row, 0)); break; }
+        }
+    });
+    if (m_model->rowCount({}) > 0) m_listView->setCurrentIndex(m_model->index(0, 0));
+    refreshButtons();
 }
 
 void RobotListWidget::onScanClicked() {
-    m_scanBtn->setEnabled(false);
+    if (m_serialManager->isScanning()) { m_serialManager->stopScan(); return; }
     m_serialManager->scanPorts();
 }
 
@@ -139,7 +151,8 @@ void RobotListWidget::onSelectionChanged() {
         m_selectedId = m_model->robotIdAt(idx.row());
         m_robotManager->setSelectedRobot(m_selectedId);
         auto *robot = m_robotManager->robot(m_selectedId);
-        const bool connected = robot && robot->state() == RobotConnectionState::Connected;
+        const bool connected = robot && (robot->state() == RobotConnectionState::Connected
+            || robot->state() == RobotConnectionState::Connecting);
         const bool canConnect = robot && (robot->state() == RobotConnectionState::Disconnected
             || robot->state() == RobotConnectionState::Error);
         m_connectBtn->setEnabled(canConnect);
@@ -159,7 +172,8 @@ void RobotListWidget::refreshButtons() {
     for (auto *robot : m_robotManager->allRobots()) {
         canConnectAny = canConnectAny || robot->state() == RobotConnectionState::Disconnected
             || robot->state() == RobotConnectionState::Error;
-        connectedAny = connectedAny || robot->state() == RobotConnectionState::Connected;
+        connectedAny = connectedAny || robot->state() == RobotConnectionState::Connected
+            || robot->state() == RobotConnectionState::Connecting;
     }
     m_connectAllBtn->setEnabled(canConnectAny);
     m_disconnectAllBtn->setEnabled(connectedAny);

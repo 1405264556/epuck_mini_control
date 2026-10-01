@@ -60,6 +60,7 @@ private:
     QMap<RobotId, QGraphicsPathItem *> m_pathItems;
     QMap<RobotId, QGraphicsPathItem *> m_trailItems;
     QMap<RobotId, QPainterPath> m_trails;
+    QMap<RobotId, QVector<QPointF>> m_trailPoints;
     QGraphicsEllipseItem *m_goalMarker = nullptr;
     QVector<QGraphicsRectItem *> m_obstacleItems;
     QVector<Vec2> m_virtualObstacles;

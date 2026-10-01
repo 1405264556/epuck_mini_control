@@ -5,11 +5,12 @@ add_library(epuck_control STATIC
     FormationController.h FormationController.cpp
     FlockingController.h FlockingController.cpp
     PathPlanner.h PathPlanner.cpp
+    PathPlanningJob.h PathPlanningJob.cpp
     MultiRobotCoordinator.h MultiRobotCoordinator.cpp
     CollisionAvoidance.h CollisionAvoidance.cpp
 )
 
-target_link_libraries(epuck_control PUBLIC epuck_core epuck_util Qt6::Core)
+target_link_libraries(epuck_control PUBLIC epuck_core epuck_util Qt6::Core Qt6::Concurrent)
 
 if(Eigen3_FOUND)
     target_link_libraries(epuck_control PUBLIC Eigen3::Eigen)

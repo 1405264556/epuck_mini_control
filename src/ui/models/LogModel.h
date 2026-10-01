@@ -12,5 +12,5 @@ public slots:
     void appendEntry(const LogEntry &entry);
 private:
     QList<LogEntry> m_entries;
-    static constexpr int MAX_VISIBLE = 10000;
+    static constexpr int MAX_VISIBLE = 1000;
 };

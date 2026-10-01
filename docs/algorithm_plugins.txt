@@ -1,0 +1,5 @@
+Place compatible IMultiRobotStrategy Qt plugins in this directory.
+Build plugins with the same Qt version, compiler and architecture as the application.
+The bundled Python/MATLAB consensus examples describe a future external process
+adapter protocol; they are not automatically loaded as native plugins.
+See ../docs/multi_robot_control.md for the API and limitations.

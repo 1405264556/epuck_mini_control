@@ -31,14 +31,16 @@
       "name": "mingw-debug",
       "configurePreset": "mingw-debug",
       "environment": {
-        "PATH": "F:/Qt/6.10.3/mingw_64/bin;F:/Tools/mingw64/mingw64/bin;$penv{PATH}"
+        "PATH": "F:/Qt/6.10.3/mingw_64/bin;F:/Tools/mingw64/mingw64/bin;$penv{PATH}",
+        "QT_PLUGIN_PATH": "F:/Qt/6.10.3/mingw_64/plugins"
       }
     },
     {
       "name": "mingw-release",
       "configurePreset": "mingw-release",
       "environment": {
-        "PATH": "F:/Qt/6.10.3/mingw_64/bin;F:/Tools/mingw64/mingw64/bin;$penv{PATH}"
+        "PATH": "F:/Qt/6.10.3/mingw_64/bin;F:/Tools/mingw64/mingw64/bin;$penv{PATH}",
+        "QT_PLUGIN_PATH": "F:/Qt/6.10.3/mingw_64/plugins"
       }
     }
   ]

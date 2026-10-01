@@ -34,6 +34,7 @@ public:
     void resume();
     void stopAll();
     void emergencyStop();
+    void manualDrive(const QMap<RobotId, WheelSpeeds> &commands);
     bool isActive() const;
     bool isPaused() const { return m_paused; }
 
@@ -51,6 +52,7 @@ private slots:
 
 private:
     void sendMotorCommand(const RobotId &id, double leftSpeed, double rightSpeed);
+    void flushMotorCommands();
     MultiRobotWorldState buildWorldState(double dt) const;
 
     RobotManager *m_robotManager;
@@ -68,4 +70,6 @@ private:
     QList<RobotId> m_strategyRobotIds;
     QMap<RobotId, QList<RobotId>> m_neighborTopology;
     QVariantMap m_strategyParameters;
+    QList<RobotId> m_participants;
+    QMap<RobotId, WheelSpeeds> m_pendingCommands;
 };

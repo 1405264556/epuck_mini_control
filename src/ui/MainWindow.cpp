@@ -25,6 +25,11 @@
 #include <QMessageBox>
 #include <QCloseEvent>
 #include <QLabel>
+#include <QActionGroup>
+#include <QStyle>
+#include <QVBoxLayout>
+#include <QTimer>
+#include <QApplication>
 
 MainWindow::MainWindow(RobotManager *robotMgr,
                        SerialManager *serialMgr,
@@ -36,7 +41,7 @@ MainWindow::MainWindow(RobotManager *robotMgr,
     , m_coordinator(coordinator)
     , m_settings(settings)
 {
-    setWindowTitle("e-puck Mini 控制中心");
+    setWindowTitle("e-puck Mini 控制中心 · 0.5.0");
     resize(1400, 900);
     setMinimumSize(1024, 700);
 
@@ -65,7 +70,7 @@ void MainWindow::setupMenuBar() {
 
     auto *robotMenu = menuBar()->addMenu("机器人(&R)");
     m_scanAction = robotMenu->addAction("扫描机器人(&S)", this, [this]() {
-        showConnectDialog();
+        m_serialManager->scanPorts();
     }, QKeySequence("Ctrl+R"));
     m_connectAction = robotMenu->addAction("连接(&C)...", this, [this]() {
         showConnectDialog();
@@ -87,18 +92,22 @@ void MainWindow::setupMenuBar() {
     }, QKeySequence("Ctrl+F"));
 
     auto *controlMenu = menuBar()->addMenu("控制(&C)");
-    m_formationAction = controlMenu->addAction("编队控制(&F)...", this, []() {
-        // Will be wired in Phase 5
+    m_formationAction = controlMenu->addAction("协调控制(&F)...", this, [this]() {
+        setControlMode(1);
+        m_controlPanel->showCoordinationPage();
     });
     controlMenu->addSeparator();
     m_emergencyStopAction = controlMenu->addAction("紧急停止(&E)", this, [this]() {
+        m_controlPanel->stopManualControls();
         m_coordinator->emergencyStop();
         statusBar()->showMessage("紧急停止 - 所有电机已停止", 5000);
     }, QKeySequence("Escape"));
 
     auto *viewMenu = menuBar()->addMenu("视图(&V)");
     viewMenu->addAction("重置布局(&R)", this, [this]() {
-        // Restore default dock arrangement
+        setControlMode(m_controlMode);
+        m_logDock->hide();
+        m_coordinationCanvas->fitAllRobots();
     });
 
     auto *helpMenu = menuBar()->addMenu("帮助(&H)");
@@ -115,36 +124,52 @@ void MainWindow::setupToolBar() {
     toolbar->setObjectName("main_toolbar");
     toolbar->setMovable(false);
     toolbar->setIconSize(QSize(20, 20));
+    auto *brand = new QLabel("e-puck Mini");
+    brand->setStyleSheet("font-size: 16px; font-weight: 600; padding: 0 12px 0 6px;");
+    toolbar->addWidget(brand);
+    auto *modeGroup = new QActionGroup(this);
+    m_singleModeAction = toolbar->addAction("单机");
+    m_multiModeAction = toolbar->addAction("多机");
+    m_singleModeAction->setObjectName("workspaceSingle");
+    m_multiModeAction->setObjectName("workspaceMulti");
+    for (auto *action : {m_singleModeAction, m_multiModeAction}) {
+        action->setCheckable(true);
+        modeGroup->addAction(action);
+    }
+    toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    connect(m_singleModeAction, &QAction::triggered, this, [this]() { setControlMode(0); });
+    connect(m_multiModeAction, &QAction::triggered, this, [this]() { setControlMode(1); });
+    toolbar->addSeparator();
 
-    m_scanAction->setIcon(QIcon(":/icons/connect.svg"));
+    m_scanAction->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     toolbar->addAction(m_scanAction);
 
-    m_connectAction->setIcon(QIcon(":/icons/connect.svg"));
+    m_connectAction->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton));
     toolbar->addAction(m_connectAction);
 
-    m_disconnectAction->setIcon(QIcon(":/icons/disconnect.svg"));
+    m_disconnectAction->setIcon(style()->standardIcon(QStyle::SP_DialogCancelButton));
     toolbar->addAction(m_disconnectAction);
 
     toolbar->addSeparator();
 
-    m_formationAction->setIcon(QIcon(":/icons/formation.svg"));
+    m_formationAction->setIcon(style()->standardIcon(QStyle::SP_FileDialogListView));
     toolbar->addAction(m_formationAction);
 
     toolbar->addSeparator();
 
-    m_flashAction->setIcon(QIcon(":/icons/flash.svg"));
+    m_flashAction->setIcon(style()->standardIcon(QStyle::SP_DriveHDIcon));
     toolbar->addAction(m_flashAction);
 
     toolbar->addSeparator();
 
     // Emergency stop - prominent
-    m_emergencyStopAction->setIcon(QIcon(":/icons/stop.svg"));
+    m_emergencyStopAction->setIcon(style()->standardIcon(QStyle::SP_MediaStop));
     m_emergencyStopAction->setToolTip("紧急停止 (Esc)");
     toolbar->addAction(m_emergencyStopAction);
 
     toolbar->addSeparator();
 
-    m_settingsAction = toolbar->addAction(QIcon(":/icons/settings.svg"), "设置");
+    m_settingsAction = toolbar->addAction(style()->standardIcon(QStyle::SP_FileDialogDetailedView), "设置");
     connect(m_settingsAction, &QAction::triggered, this, [this]() {
         auto dlg = new SettingsDialog(m_settings, this);
         dlg->exec();
@@ -161,11 +186,38 @@ void MainWindow::setupDockWidgets() {
                                   | QDockWidget::DockWidgetFloatable);
     m_robotListWidget = new RobotListWidget(m_robotManager, m_serialManager, this);
     m_robotListDock->setWidget(m_robotListWidget);
+    m_robotListDock->setMinimumWidth(205);
     addDockWidget(Qt::LeftDockWidgetArea, m_robotListDock);
 
     // --- Central: Coordination Canvas ---
     m_coordinationCanvas = new CoordinationCanvas(m_robotManager, this);
-    setCentralWidget(m_coordinationCanvas);
+    m_coordinationCanvas->setObjectName("coordinationCanvas");
+    auto *workspace = new QWidget;
+    auto *mapLayout = new QVBoxLayout(workspace);
+    mapLayout->setContentsMargins(0, 0, 0, 0);
+    mapLayout->setSpacing(0);
+    auto *mapToolbar = new QToolBar;
+    mapToolbar->setIconSize(QSize(18, 18));
+    mapToolbar->addWidget(new QLabel("  运动地图 · cm  "));
+    auto *fit = mapToolbar->addAction(style()->standardIcon(QStyle::SP_TitleBarMaxButton), "适应地图");
+    connect(fit, &QAction::triggered, m_coordinationCanvas, &CoordinationCanvas::fitAllRobots);
+    m_goalAction = mapToolbar->addAction(style()->standardIcon(QStyle::SP_ArrowForward), "目标点");
+    m_goalAction->setCheckable(true);
+    m_obstacleAction = mapToolbar->addAction(style()->standardIcon(QStyle::SP_MessageBoxWarning), "虚拟障碍");
+    m_obstacleAction->setCheckable(true);
+    connect(m_goalAction, &QAction::toggled, this, [this](bool enabled) {
+        if (enabled) m_obstacleAction->setChecked(false);
+        m_coordinationCanvas->setGoalPickMode(enabled);
+    });
+    connect(m_obstacleAction, &QAction::toggled, this, [this](bool enabled) {
+        if (enabled) m_goalAction->setChecked(false);
+        m_coordinationCanvas->setObstacleEditMode(enabled);
+    });
+    auto *clear = mapToolbar->addAction(style()->standardIcon(QStyle::SP_TrashIcon), "清理画布");
+    connect(clear, &QAction::triggered, m_coordinationCanvas, &CoordinationCanvas::clearCanvasOverlays);
+    mapLayout->addWidget(mapToolbar);
+    mapLayout->addWidget(m_coordinationCanvas, 1);
+    setCentralWidget(workspace);
 
     // --- Right Dock: Sensor Display ---
     m_sensorDisplayDock = new QDockWidget("传感器显示", this);
@@ -181,7 +233,7 @@ void MainWindow::setupDockWidgets() {
     m_controlPanelDock->setObjectName("dock_control_panel");
     m_controlPanelDock->setFeatures(QDockWidget::DockWidgetMovable
                                     | QDockWidget::DockWidgetFloatable);
-    m_controlPanelDock->setMinimumWidth(430);
+    m_controlPanelDock->setMinimumWidth(330);
     m_controlPanel = new RobotControlPanel(m_robotManager, m_coordinator, this);
     m_controlPanelDock->setWidget(m_controlPanel);
     splitDockWidget(m_sensorDisplayDock, m_controlPanelDock, Qt::Vertical);
@@ -199,6 +251,11 @@ void MainWindow::setupDockWidgets() {
     m_logView->setUniformItemSizes(true);
     m_logDock->setWidget(m_logView);
     addDockWidget(Qt::BottomDockWidgetArea, m_logDock);
+    m_logDock->hide();
+    menuBar()->actions().at(3)->menu()->addAction(m_logDock->toggleViewAction());
+    for (auto *dock : {m_robotListDock, m_sensorDisplayDock, m_controlPanelDock}) dock->setFeatures(QDockWidget::NoDockWidgetFeatures);
+    setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
+    setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
 
     resizeDocks({m_robotListDock}, {260}, Qt::Horizontal);
     resizeDocks({m_sensorDisplayDock, m_controlPanelDock}, {300, 500}, Qt::Vertical);
@@ -208,6 +265,15 @@ void MainWindow::setupDockWidgets() {
 // ---- Status Bar ----
 void MainWindow::setupStatusBar() {
     statusBar()->showMessage("就绪 - 请扫描 COM 端口连接机器人");
+    m_onlineLabel = new QLabel;
+    m_coordinationLabel = new QLabel;
+    statusBar()->addPermanentWidget(m_onlineLabel);
+    statusBar()->addPermanentWidget(m_coordinationLabel);
+    auto *timer = new QTimer(this);
+    timer->setInterval(250);
+    connect(timer, &QTimer::timeout, this, &MainWindow::refreshStatus);
+    timer->start();
+    refreshStatus();
 }
 
 // ---- Connections ----
@@ -234,17 +300,22 @@ void MainWindow::setupConnections() {
             [this](const RobotId &id, const QString &message) {
         statusBar()->showMessage(QString("%1：%2").arg(id, message), 8000);
     });
+    connect(m_serialManager, &SerialManager::telemetryStatus, this,
+            [this](const RobotId &id, const QString &message) { statusBar()->showMessage(id + " · " + message, 5000); });
+    connect(m_coordinator, &MultiRobotCoordinator::strategyError, this,
+            [this](const QString &message) { statusBar()->showMessage(message, 8000); });
+    connect(m_coordinationCanvas, &CoordinationCanvas::robotClicked, m_robotManager, &RobotManager::setSelectedRobot);
 
     connect(m_robotManager, &RobotManager::selectedRobotChanged, this, [this](const RobotId &id) {
         statusBar()->showMessage(QString("已选中: %1").arg(id), 2000);
     });
 
     connect(m_controlPanel, &RobotControlPanel::goalPickRequested, this, [this]() {
-        m_coordinationCanvas->setGoalPickMode(true);
+        m_goalAction->setChecked(true);
         statusBar()->showMessage("请在中央画布点击路径目标点", 5000);
     });
     connect(m_controlPanel, &RobotControlPanel::obstacleEditRequested, this, [this]() {
-        m_coordinationCanvas->setObstacleEditMode(true);
+        m_obstacleAction->setChecked(true);
         statusBar()->showMessage("请在中央画布点击虚拟障碍位置", 5000);
     });
     connect(m_controlPanel, &RobotControlPanel::canvasClearRequested,
@@ -254,6 +325,7 @@ void MainWindow::setupConnections() {
     connect(m_coordinationCanvas, &CoordinationCanvas::virtualObstaclesChanged,
             m_controlPanel, &RobotControlPanel::setVirtualObstacles);
     connect(m_coordinationCanvas, &CoordinationCanvas::goalPointSelected, this, [this](const Vec2 &pos) {
+        m_goalAction->setChecked(false);
         statusBar()->showMessage(QString("已选择目标点: X=%1, Y=%2")
             .arg(pos.x, 0, 'f', 1)
             .arg(pos.y, 0, 'f', 1), 3000);
@@ -268,7 +340,7 @@ void MainWindow::setupConnections() {
 void MainWindow::saveWindowState() {
     if (m_settings) {
         m_settings->setMainWindowGeometry(saveGeometry());
-        m_settings->setMainWindowState(saveState());
+        m_settings->setMainWindowState(saveState(5));
     }
 }
 
@@ -277,8 +349,9 @@ void MainWindow::restoreWindowState() {
         QByteArray geo = m_settings->mainWindowGeometry();
         if (!geo.isEmpty()) restoreGeometry(geo);
         QByteArray state = m_settings->mainWindowState();
-        if (!state.isEmpty()) restoreState(state);
+        if (!state.isEmpty()) restoreState(state, 5);
     }
+    setControlMode(0);
 }
 
 void MainWindow::showConnectDialog() {
@@ -322,6 +395,41 @@ bool MainWindow::requestRobotConnection(const QString &id) {
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
+    m_controlPanel->stopManualControls();
+    m_coordinator->emergencyStop();
     saveWindowState();
     event->accept();
+}
+
+void MainWindow::setControlMode(int mode) {
+    m_controlMode = mode == 1 ? 1 : 0;
+    m_controlPanel->setControlMode(m_controlMode);
+    m_singleModeAction->setChecked(m_controlMode == 0);
+    m_multiModeAction->setChecked(m_controlMode == 1);
+    m_sensorDisplayWidget->setMultiRobotMode(m_controlMode == 1);
+    removeDockWidget(m_controlPanelDock);
+    m_controlPanelDock->setMinimumWidth(m_controlMode == 1 ? 0 : 330);
+    m_controlPanelDock->setWindowTitle(m_controlMode == 1 ? "多机器人 · 同步与分控" : "单机器人 · 驱动与任务");
+    if (m_controlMode == 1) {
+        addDockWidget(Qt::BottomDockWidgetArea, m_controlPanelDock);
+        resizeDocks({m_controlPanelDock}, {340}, Qt::Vertical);
+    } else {
+        addDockWidget(Qt::RightDockWidgetArea, m_controlPanelDock);
+        splitDockWidget(m_sensorDisplayDock, m_controlPanelDock, Qt::Vertical);
+        resizeDocks({m_sensorDisplayDock, m_controlPanelDock}, {250, 400}, Qt::Vertical);
+    }
+    m_controlPanelDock->show();
+    resizeDocks({m_robotListDock}, {210}, Qt::Horizontal);
+    resizeDocks({m_sensorDisplayDock}, {350}, Qt::Horizontal);
+    QTimer::singleShot(0, m_coordinationCanvas, &CoordinationCanvas::fitAllRobots);
+}
+
+void MainWindow::refreshStatus() {
+    m_onlineLabel->setText(QString("在线 %1 / %2  ").arg(m_robotManager->connectedRobots().size()).arg(m_robotManager->robotCount()));
+    m_coordinationLabel->setText(m_coordinator->isPaused() ? "协调已暂停  " : m_coordinator->isActive() ? "协调运行中  " : "手动控制  ");
+}
+
+void MainWindow::changeEvent(QEvent *event) {
+    if (event->type() == QEvent::WindowDeactivate && m_controlPanel) m_controlPanel->stopManualControls();
+    QMainWindow::changeEvent(event);
 }

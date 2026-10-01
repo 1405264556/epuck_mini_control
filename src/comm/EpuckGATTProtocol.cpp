@@ -46,37 +46,48 @@ const QBluetoothUuid EpuckGATTProtocol::CHAR_OTA_STATUS(
 void EpuckGATTProtocol::parseSensorData(const QBluetoothUuid &characteristic,
                                          const QByteArray &value,
                                          SensorData &accumulator) {
-    accumulator.timestamp = QDateTime::currentMSecsSinceEpoch();
+    SensorData update;
+    update.timestamp = QDateTime::currentMSecsSinceEpoch();
     const auto *d = reinterpret_cast<const uint8_t *>(value.constData());
     int len = value.size();
 
     if (characteristic == CHAR_PROXIMITY) {
+        if (len < 16) return;
         for (int i = 0; i < 8 && (i * 2 + 1) < len; ++i) {
-            accumulator.proximity[i] = static_cast<uint16_t>(d[i * 2] | (d[i * 2 + 1] << 8));
+            update.proximity[i] = static_cast<uint16_t>(d[i * 2] | (d[i * 2 + 1] << 8));
         }
+        update.mark(SensorData::Proximity);
     } else if (characteristic == CHAR_IMU) {
         if (len >= 24) {
-            std::memcpy(&accumulator.accelerometer.x, d, 4);
-            std::memcpy(&accumulator.accelerometer.y, d + 4, 4);
-            std::memcpy(&accumulator.accelerometer.z, d + 8, 4);
-            std::memcpy(&accumulator.gyroscope.x, d + 12, 4);
-            std::memcpy(&accumulator.gyroscope.y, d + 16, 4);
-            std::memcpy(&accumulator.gyroscope.z, d + 20, 4);
+            std::memcpy(&update.accelerometer.x, d, 4);
+            std::memcpy(&update.accelerometer.y, d + 4, 4);
+            std::memcpy(&update.accelerometer.z, d + 8, 4);
+            std::memcpy(&update.gyroscope.x, d + 12, 4);
+            std::memcpy(&update.gyroscope.y, d + 16, 4);
+            std::memcpy(&update.gyroscope.z, d + 20, 4);
+            update.mark(SensorData::Accelerometer);
+            update.mark(SensorData::Gyroscope);
         }
     } else if (characteristic == CHAR_MICROPHONE) {
+        if (len < 16) return;
         for (int i = 0; i < 4 && (i * 4 + 3) < len; ++i) {
-            std::memcpy(&accumulator.microphones[i], d + i * 4, 4);
+            std::memcpy(&update.microphones[i], d + i * 4, 4);
         }
+        update.mark(SensorData::Microphone);
     } else if (characteristic == CHAR_TOF) {
+        if (len < 129) return;
         int count = (len - 1) / 2;
         for (int i = 0; i < count && i < 64; ++i) {
-            accumulator.tof[i] = static_cast<uint16_t>(d[1 + i * 2] | (d[1 + i * 2 + 1] << 8));
+            update.tof[i] = static_cast<uint16_t>(d[1 + i * 2] | (d[1 + i * 2 + 1] << 8));
         }
+        update.mark(SensorData::ToF);
     } else if (characteristic == CHAR_BATTERY) {
         if (len >= 1) {
-            accumulator.batteryVoltage = d[0] / 10.0;  // 0-255 -> 0-25.5V scaled
+            update.batteryPercent = qBound(0, static_cast<int>(d[0]), 100);
+            update.mark(SensorData::Battery);
         }
     }
+    accumulator.merge(update);
 }
 
 // ---- Encoding ----

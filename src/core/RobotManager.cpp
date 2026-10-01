@@ -14,7 +14,10 @@ RobotManager::~RobotManager() {
 
 RobotInstance *RobotManager::addRobot(const BLEDeviceInfo &info) {
     RobotId id = info.deriveId();
-    if (m_robots.contains(id)) return m_robots[id];
+    if (m_robots.contains(id)) {
+        m_robots[id]->updateDeviceInfo(info);
+        return m_robots[id];
+    }
 
     auto *robot = new RobotInstance(info, this);
 
@@ -44,6 +47,7 @@ void RobotManager::removeRobot(const RobotId &id) {
     if (m_selectedId == id) {
         m_selectedId.clear();
         if (!m_robots.isEmpty()) setSelectedRobot(m_robots.firstKey());
+        else emit selectedRobotChanged({});
     }
     emit robotRemoved(id);
 }

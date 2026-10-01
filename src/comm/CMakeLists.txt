@@ -4,6 +4,7 @@ add_library(epuck_comm STATIC
     EpuckGATTProtocol.h EpuckGATTProtocol.cpp
     EpuckSerComProtocol.h EpuckSerComProtocol.cpp
     SerialPortWorker.h SerialPortWorker.cpp
+    MotorCommandScheduler.h MotorCommandScheduler.cpp
     SerialManager.h SerialManager.cpp
     DFUProgrammer.h DFUProgrammer.cpp
     OTAProgrammer.h OTAProgrammer.cpp

@@ -2,6 +2,7 @@
 
 #include "EpuckSerComProtocol.h"
 #include "SerialPortWorker.h"
+#include "MotorCommandScheduler.h"
 #include "core/RobotInstance.h"
 #include "core/RobotManager.h"
 #include "util/Logger.h"
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 
 struct SerialScanSession {
     int token = 0;
@@ -45,7 +47,7 @@ bool readUntil(QSerialPort &port, QByteArray &buffer, int timeoutMs, int minimum
         const int remaining = qMax(1, timeoutMs - static_cast<int>(timer.elapsed()));
         if (!port.waitForReadyRead(remaining)) break;
         buffer.append(port.readAll());
-        if (buffer.contains('\n') || (minimumBytes > 0 && buffer.size() >= minimumBytes)) {
+        if (minimumBytes > 0 ? buffer.size() >= minimumBytes : buffer.contains('\n')) {
             return true;
         }
     }
@@ -89,9 +91,12 @@ bool probePort(const QString &portName, const QList<int> &baudRates,
         port.write(sensorCommand);
         port.waitForBytesWritten(80);
         response.clear();
-        readUntil(port, response, 380, 16);
-        if (response.startsWith(sensorCommand)) response.remove(0, sensorCommand.size());
-        if (response.size() >= 16) {
+        readUntil(port, response, 500, 28);
+        SensorData sample;
+        if (response.size() == 28 && EpuckSerComProtocol::parseSensorResponse(response, sample)
+            && sample.accelMagnitude >= 0 && sample.accelMagnitude < 100000
+            && sample.accelOrientation >= 0 && sample.accelOrientation <= 360
+            && sample.accelInclination >= -180 && sample.accelInclination <= 180) {
             verifiedBaudRate = baudRate;
             return true;
         }
@@ -141,6 +146,7 @@ QStringList SerialManager::availablePorts() const {
 }
 
 void SerialManager::scanPorts() {
+    if (m_scanning) return;
     cancelScan(false);
 
     auto session = std::make_shared<SerialScanSession>();
@@ -265,6 +271,7 @@ void SerialManager::cancelScan(bool notifyFinished) {
     const bool wasScanning = m_scanning;
     if (m_scanSession) m_scanSession->cancelled.store(true);
     m_scanSession.reset();
+    m_scanPool.clear();
     m_pendingVerifications = 0;
     m_scanning = false;
     if (notifyFinished && wasScanning) emit scanFinished();
@@ -292,6 +299,9 @@ bool SerialManager::connectToPort(const QString &portName, const RobotId &id, in
     info.friendlyName = portName;
     info.baudRate = baudRate;
     info.isEpuckMini = true;
+    if (auto *existing = m_robotManager->robot(id)) {
+        info.friendlyName = existing->name();
+    }
     auto *robot = m_robotManager->addRobot(info);
     robot->setSerialManager(this);
     robot->setConnectionState(RobotConnectionState::Connecting);
@@ -310,9 +320,9 @@ bool SerialManager::connectToPort(const QString &portName, const RobotId &id, in
     connect(thread, &QThread::started, worker, &SerialPortWorker::openPort);
     connect(thread, &QThread::finished, worker, &QObject::deleteLater);
     connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    connect(worker, &SerialPortWorker::connectionOpened, this, [this](const RobotId &robotId) {
+    connect(worker, &SerialPortWorker::connectionOpened, this, [this, worker](const RobotId &robotId) {
         auto it = m_contexts.find(robotId);
-        if (it == m_contexts.end()) return;
+        if (it == m_contexts.end() || it->worker != worker || it->closing) return;
         it->connected = true;
         if (auto *robot = m_robotManager->robot(robotId)) {
             robot->setConnectionState(RobotConnectionState::Connected);
@@ -321,8 +331,11 @@ bool SerialManager::connectToPort(const QString &portName, const RobotId &id, in
     });
     connect(worker, &SerialPortWorker::connectionClosed,
             this, &SerialManager::handleWorkerClosed);
+    connect(worker, &SerialPortWorker::telemetryStatus, this, &SerialManager::telemetryStatus);
     connect(worker, &SerialPortWorker::sensorDataReceived, this,
-            [this](const RobotId &robotId, const SensorData &data) {
+            [this, worker](const RobotId &robotId, const SensorData &data) {
+        const auto ctx = m_contexts.constFind(robotId);
+        if (ctx == m_contexts.cend() || ctx->worker != worker || ctx->closing) return;
         if (auto *robot = m_robotManager->robot(robotId)) robot->updateSensorData(data);
         emit sensorDataReceived(robotId, data);
     });
@@ -337,6 +350,8 @@ bool SerialManager::connectToPort(const QString &portName, const RobotId &id, in
 void SerialManager::disconnectRobot(const RobotId &id) {
     auto it = m_contexts.find(id);
     if (it == m_contexts.end() || !it->worker) return;
+    it->closing = true;
+    it->connected = false;
     if (auto *robot = m_robotManager->robot(id)) {
         robot->setConnectionState(RobotConnectionState::Disconnecting);
     }
@@ -379,10 +394,39 @@ bool SerialManager::writeToRobot(const RobotId &id, const QByteArray &data) {
     auto it = m_contexts.find(id);
     if (it == m_contexts.end() || !it->connected || !it->worker || data.isEmpty()) return false;
     QPointer<SerialPortWorker> worker(it->worker);
+    if (static_cast<uint8_t>(data[0]) == EpuckSerComProtocol::CMD_MOTOR) {
+        const quint64 sequence = ++m_motorSequence;
+        const qint64 deadline = MotorCommandScheduler::nowMs() + 12;
+        QMetaObject::invokeMethod(it->worker, [worker, data, deadline, sequence]() {
+            if (worker) worker->scheduleMotorCommand(data, deadline, sequence);
+        }, Qt::QueuedConnection);
+        return true;
+    }
     QMetaObject::invokeMethod(it->worker, [worker, data]() {
         if (worker) worker->writeData(data);
     }, Qt::QueuedConnection);
     return true;
+}
+
+quint64 SerialManager::writeMotorBatch(const QMap<RobotId, WheelSpeeds> &commands, int leadTimeMs) {
+    const quint64 sequence = ++m_motorSequence;
+    const qint64 deadline = MotorCommandScheduler::nowMs() + qBound(0, leadTimeMs, 100);
+    int submitted = 0;
+    for (auto it = commands.cbegin(); it != commands.cend(); ++it) {
+        const auto context = m_contexts.constFind(it.key());
+        if (context == m_contexts.cend() || !context->connected || context->closing) continue;
+        const double left = std::isfinite(it->left) ? qBound(-1.0, it->left, 1.0) : 0;
+        const double right = std::isfinite(it->right) ? qBound(-1.0, it->right, 1.0) : 0;
+        const auto data = EpuckSerComProtocol::buildMotorCommand(qRound(left * 1000), qRound(right * 1000));
+        if (auto *robot = m_robotManager->robot(it.key())) robot->recordMotorCommand(left, right);
+        QPointer<SerialPortWorker> worker(context->worker);
+        QMetaObject::invokeMethod(context->worker, [worker, data, deadline, sequence]() {
+            if (worker) worker->scheduleMotorCommand(data, deadline, sequence);
+        }, Qt::QueuedConnection);
+        ++submitted;
+    }
+    if (submitted) emit motorBatchQueued(sequence, submitted, deadline);
+    return sequence;
 }
 
 void SerialManager::startSensorPolling(const RobotId &id, int intervalMs) {

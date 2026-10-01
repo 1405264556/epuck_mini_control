@@ -43,6 +43,7 @@ ConnectDialog::ConnectDialog(SerialManager *serialMgr, QWidget *parent)
     m_table->horizontalHeader()->setStretchLastSection(true);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     layout->addWidget(m_table);
 
     // Bottom buttons
@@ -127,12 +128,12 @@ void ConnectDialog::addDeviceRow(const BLEDeviceInfo &info) {
             // Update existing row
             m_devices[i] = info;
             if (info.isEpuckMini) {
-                m_table->item(i, 0)->setForeground(QColor("#a6e3a1"));
+                m_table->item(i, 0)->setForeground(QColor("#087f72"));
                 m_table->item(i, 0)->setText(info.friendlyName);
                 m_table->item(i, 1)->setText("e-puck Mini");
-                m_table->item(i, 1)->setForeground(QColor("#a6e3a1"));
+                m_table->item(i, 1)->setForeground(QColor("#087f72"));
                 m_table->item(i, 3)->setText("已确认");
-                m_table->item(i, 3)->setForeground(QColor("#a6e3a1"));
+                m_table->item(i, 3)->setForeground(QColor("#087f72"));
             }
             return;
         }
@@ -150,7 +151,7 @@ void ConnectDialog::addDeviceRow(const BLEDeviceInfo &info) {
     auto *nameItem = new QTableWidgetItem(info.friendlyName.isEmpty()
         ? QString("未知设备") : info.friendlyName);
     if (info.isEpuckMini) {
-        nameItem->setForeground(QColor("#a6e3a1"));
+        nameItem->setForeground(QColor("#087f72"));
     } else {
         nameItem->setForeground(QColor("#585b70"));
     }
@@ -159,7 +160,7 @@ void ConnectDialog::addDeviceRow(const BLEDeviceInfo &info) {
     // Type
     auto *typeItem = new QTableWidgetItem(
         info.isEpuckMini ? "e-puck Mini" : "未知");
-    typeItem->setForeground(info.isEpuckMini ? QColor("#a6e3a1") : QColor("#585b70"));
+    typeItem->setForeground(info.isEpuckMini ? QColor("#087f72") : QColor("#585b70"));
     m_table->setItem(r, 1, typeItem);
 
     // Port
@@ -167,7 +168,7 @@ void ConnectDialog::addDeviceRow(const BLEDeviceInfo &info) {
 
     // Status
     auto *statusItem = new QTableWidgetItem(info.isEpuckMini ? "已确认" : "验证中...");
-    statusItem->setForeground(info.isEpuckMini ? QColor("#a6e3a1") : QColor("#585b70"));
+    statusItem->setForeground(info.isEpuckMini ? QColor("#087f72") : QColor("#585b70"));
     m_table->setItem(r, 3, statusItem);
 }
 
@@ -214,7 +215,11 @@ void ConnectDialog::startCOMScan() {
             m_statusLabel->setText(QString("正在验证 %1/%2：%3 %4")
                 .arg(completed).arg(total).arg(portName, verified ? "已识别" : "无响应"));
         });
-    m_serialManager->scanPorts();
+    if (m_serialManager->isScanning()) {
+        for (const auto &info : m_serialManager->discoveredDevices()) addDeviceRow(info);
+    } else {
+        m_serialManager->scanPorts();
+    }
 }
 
 void ConnectDialog::onScanClicked() {}

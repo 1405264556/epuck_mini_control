@@ -5,6 +5,7 @@
 RobotListModel::RobotListModel(RobotManager *manager, QObject *parent)
     : QAbstractListModel(parent), m_manager(manager)
 {
+    for (auto *robot : m_manager->allRobots()) m_robotIds.append(robot->id());
     connect(m_manager, &RobotManager::robotAdded, this, &RobotListModel::onRobotAdded);
     connect(m_manager, &RobotManager::robotRemoved, this, &RobotListModel::onRobotRemoved);
     connect(m_manager, &RobotManager::robotConnectionStateChanged,

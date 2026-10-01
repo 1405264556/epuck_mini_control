@@ -1,5 +1,7 @@
 #pragma once
 #include <QWidget>
+#include <QMap>
+#include <array>
 #include "core/Types.h"
 class QPushButton;
 class RobotManager;
@@ -19,6 +21,7 @@ private:
 
     RobotManager *m_robotManager;
     RobotId m_currentId;
+    QMap<RobotId, std::array<bool, 10>> m_requestedStates;
 
     // 8 ring LEDs (0-7, clockwise from front-right)
     QPushButton *m_ringLEDs[8];

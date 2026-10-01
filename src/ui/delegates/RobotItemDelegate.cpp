@@ -8,14 +8,14 @@ void RobotItemDelegate::paint(QPainter *painter, const QStyleOptionViewItem &opt
     painter->setRenderHint(QPainter::Antialiasing);
 
     // Background
-    QColor bg = option.state & QStyle::State_Selected ? QColor("#45475a") : QColor("#1e1e2e");
+    QColor bg = option.state & QStyle::State_Selected ? QColor("#e0f0e9") : QColor("#ffffff");
     painter->fillRect(option.rect, bg);
 
     // State indicator dot
     int state = index.data(RobotListModel::StateRole).toInt();
-    QColor dotColor = (state == 2) ? QColor("#a6e3a1")   // Connected
-                    : (state == 1) ? QColor("#f9e2af")   // Connecting
-                    : QColor("#f38ba8");                   // Disconnected
+    QColor dotColor = (state == 2) ? QColor("#087f72")
+                    : (state == 1) ? QColor("#b28723")
+                    : (state == 4) ? QColor("#d74950") : QColor("#a4b2b8");
     QRect dotRect(option.rect.left() + 8, option.rect.top() + 8, 12, 12);
     painter->setBrush(dotColor);
     painter->setPen(Qt::NoPen);
@@ -24,9 +24,10 @@ void RobotItemDelegate::paint(QPainter *painter, const QStyleOptionViewItem &opt
     // Name
     QRect textRect(option.rect.left() + 28, option.rect.top(),
                    option.rect.width() - 36, option.rect.height());
-    painter->setPen(QColor("#cdd6f4"));
+    painter->setPen(QColor("#223139"));
     painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter,
-                      index.data(RobotListModel::NameRole).toString());
+                      option.fontMetrics.elidedText(index.data(RobotListModel::NameRole).toString(),
+                          Qt::ElideRight, textRect.width()));
 
     painter->restore();
 }

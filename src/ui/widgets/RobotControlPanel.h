@@ -13,6 +13,7 @@ class MultiRobotCoordinator;
 class MotorControlWidget;
 class LEDControlWidget;
 class MultiRobotDriveWidget;
+class PathPlanningJob;
 
 class RobotControlPanel : public QWidget {
     Q_OBJECT
@@ -21,6 +22,9 @@ public:
                                QWidget *parent = nullptr);
 
 public slots:
+    void setControlMode(int mode);
+    void showCoordinationPage();
+    void stopManualControls();
     void setGoalFromCanvas(const Vec2 &pos);
     void setVirtualObstacles(const QVector<Vec2> &obstacles);
 
@@ -47,14 +51,12 @@ private:
     QWidget *createSingleRobotPage();
     QWidget *createMultiRobotPage();
     QList<RobotId> connectedRobotIds() const;
-    QVector<Vec2> planWithBuiltInAStar(const Vec2 &start, const Vec2 &goal) const;
-    QVector<Vec2> planWithExternalScript(const Vec2 &start, const Vec2 &goal) const;
 
     RobotManager *m_robotManager;
     MultiRobotCoordinator *m_coordinator;
-    QComboBox *m_modeCombo;
     QStackedWidget *m_modeStack;
     QTabWidget *m_singleTabs;
+    QTabWidget *m_multiTabs;
     MotorControlWidget *m_motorWidget;
     LEDControlWidget *m_ledWidget;
     QLabel *m_singleSummary;
@@ -74,4 +76,6 @@ private:
     RobotId m_currentId;
     QVector<Vec2> m_lastPlannedPath;
     QVector<Vec2> m_virtualObstacles;
+    PathPlanningJob *m_planningJob = nullptr;
+    bool m_returnAfterPlan = false;
 };

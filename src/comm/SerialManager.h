@@ -25,6 +25,7 @@ public:
     void scanPorts();
     void stopScan();
     bool isScanning() const { return m_scanning; }
+    QList<BLEDeviceInfo> discoveredDevices() const { return m_discoveredDevices; }
     QStringList availablePorts() const;
 
     bool connectToPort(const QString &portName, const RobotId &id, int baudRate = 115200);
@@ -33,6 +34,7 @@ public:
     bool isPortActive(const QString &portName) const;
 
     bool writeToRobot(const RobotId &id, const QByteArray &data);
+    quint64 writeMotorBatch(const QMap<RobotId, WheelSpeeds> &commands, int leadTimeMs = 12);
     void startSensorPolling(const RobotId &id, int intervalMs = 60);
     void stopSensorPolling(const RobotId &id);
     void requestCameraFrame(const RobotId &id);
@@ -47,6 +49,8 @@ signals:
     void robotDisconnected(const RobotId &id);
     void sensorDataReceived(const RobotId &id, const SensorData &data);
     void errorOccurred(const RobotId &id, const QString &message);
+    void telemetryStatus(const RobotId &id, const QString &message);
+    void motorBatchQueued(quint64 sequence, int robotCount, qint64 deadlineMs);
 
 private:
     struct PortContext {
@@ -55,6 +59,7 @@ private:
         QThread *thread = nullptr;
         SerialPortWorker *worker = nullptr;
         bool connected = false;
+        bool closing = false;
     };
 
     void cancelScan(bool notifyFinished);
@@ -76,5 +81,6 @@ private:
     int m_scanTotal = 0;
     bool m_scanning = false;
     bool m_shuttingDown = false;
+    quint64 m_motorSequence = 0;
     RobotManager *m_robotManager;
 };

@@ -9,8 +9,12 @@ QVariant LogModel::data(const QModelIndex &index, int role) const {
     return {};
 }
 void LogModel::appendEntry(const LogEntry &entry) {
+    if (m_entries.size() >= MAX_VISIBLE) {
+        beginRemoveRows({}, 0, 0);
+        m_entries.removeFirst();
+        endRemoveRows();
+    }
     beginInsertRows({}, m_entries.size(), m_entries.size());
     m_entries.append(entry);
-    while (m_entries.size() > MAX_VISIBLE) { m_entries.removeFirst(); }
     endInsertRows();
 }

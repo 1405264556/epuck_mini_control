@@ -10,11 +10,17 @@
 #include <QPainter>
 #include <QMouseEvent>
 #include <QtMath>
+#include <QTimer>
+#include <QSpinBox>
+#include <QSignalBlocker>
+#include <QStyle>
+#include <QHideEvent>
 
 // ==================== JoystickWidget ====================
 
 JoystickWidget::JoystickWidget(QWidget *parent) : QWidget(parent) {
-    setMinimumSize(AREA_SIZE + 40, AREA_SIZE + 40);
+    setMinimumSize(AREA_SIZE + 64, AREA_SIZE + 40);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setCursor(Qt::CrossCursor);
     m_knobPos = QPointF(AREA_SIZE / 2.0, AREA_SIZE / 2.0);
 }
@@ -33,29 +39,29 @@ void JoystickWidget::paintEvent(QPaintEvent *) {
     int oy = (height() - AREA_SIZE) / 2;
 
     // Background circle
-    p.setPen(QPen(QColor("#585b70"), 2));
-    p.setBrush(QColor("#313244"));
+    p.setPen(QPen(QColor("#b5c3c8"), 2));
+    p.setBrush(QColor("#eef4f3"));
     p.drawEllipse(ox, oy, AREA_SIZE, AREA_SIZE);
 
     // Crosshair
-    p.setPen(QPen(QColor("#45475a"), 1, Qt::DashLine));
+    p.setPen(QPen(QColor("#c3d0d3"), 1, Qt::DashLine));
     p.drawLine(ox, oy + AREA_SIZE / 2, ox + AREA_SIZE, oy + AREA_SIZE / 2);
     p.drawLine(ox + AREA_SIZE / 2, oy, ox + AREA_SIZE / 2, oy + AREA_SIZE);
 
     // Center dot
     p.setPen(Qt::NoPen);
-    p.setBrush(QColor("#585b70"));
+    p.setBrush(QColor("#879a9e"));
     p.drawEllipse(QPointF(ox + AREA_SIZE / 2.0, oy + AREA_SIZE / 2.0), 4, 4);
 
     // Knob position
     double kx = ox + m_knobPos.x();
     double ky = oy + m_knobPos.y();
-    p.setPen(QPen(QColor("#89b4fa"), 2));
-    p.setBrush(QColor("#89b4fa"));
+    p.setPen(QPen(QColor("#087f72"), 2));
+    p.setBrush(QColor("#087f72"));
     p.drawEllipse(QPointF(kx, ky), KNOB_R, KNOB_R);
 
     // Direction labels
-    p.setPen(QColor("#a6adc8"));
+    p.setPen(QColor("#53676d"));
     QFont f = p.font(); f.setPointSize(10); p.setFont(f);
     p.drawText(QRect(ox, oy - 20, AREA_SIZE, 20), Qt::AlignCenter, "前");
     p.drawText(QRect(ox, oy + AREA_SIZE, AREA_SIZE, 20), Qt::AlignCenter, "后");
@@ -146,7 +152,7 @@ MotorControlWidget::MotorControlWidget(RobotManager *robotMgr, QWidget *parent)
     midBox->addStretch();
     m_stopBtn = new QPushButton("急停");
     m_stopBtn->setObjectName("emergencyStop");
-    m_stopBtn->setStyleSheet("QPushButton#emergencyStop { background-color: #f38ba8; color: #1e1e2e; font-weight: bold; padding: 10px; }");
+    m_stopBtn->setIcon(style()->standardIcon(QStyle::SP_MediaStop));
     midBox->addWidget(m_stopBtn);
     midBox->addStretch();
     hlay->addLayout(midBox);
@@ -159,6 +165,21 @@ MotorControlWidget::MotorControlWidget(RobotManager *robotMgr, QWidget *parent)
     m_rightLabel = new QLabel("0");
     rightBox->addWidget(m_rightLabel);
     hlay->addLayout(rightBox);
+    m_leftSpin = new QSpinBox;
+    m_rightSpin = new QSpinBox;
+    for (auto *spin : {m_leftSpin, m_rightSpin}) {
+        spin->setRange(-1000, 1000);
+        spin->setSingleStep(25);
+        spin->setKeyboardTracking(false);
+        spin->setFixedWidth(82);
+        spin->setToolTip("步 / 秒，范围 -1000 到 1000");
+    }
+    leftBox->addWidget(m_leftSpin);
+    rightBox->addWidget(m_rightSpin);
+    connect(m_leftSlider, &QSlider::valueChanged, m_leftSpin, &QSpinBox::setValue);
+    connect(m_rightSlider, &QSlider::valueChanged, m_rightSpin, &QSpinBox::setValue);
+    connect(m_leftSpin, QOverload<int>::of(&QSpinBox::valueChanged), m_leftSlider, &QSlider::setValue);
+    connect(m_rightSpin, QOverload<int>::of(&QSpinBox::valueChanged), m_rightSlider, &QSlider::setValue);
 
     m_tabWidget->addTab(sliderTab, "滑块");
     layout->addWidget(m_tabWidget);
@@ -167,27 +188,63 @@ MotorControlWidget::MotorControlWidget(RobotManager *robotMgr, QWidget *parent)
     connect(m_rightSlider, &QSlider::valueChanged, this, &MotorControlWidget::onSpeedChanged);
     connect(m_stopBtn, &QPushButton::clicked, this, &MotorControlWidget::onStop);
     connect(m_joystick, &JoystickWidget::speedsChanged, this, &MotorControlWidget::onJoystickSpeed);
+    m_heartbeat = new QTimer(this);
+    m_heartbeat->setInterval(100);
+    connect(m_heartbeat, &QTimer::timeout, this, [this]() {
+        if (m_moving && isVisible()) sendSpeeds(m_activeSpeeds.left, m_activeSpeeds.right);
+    });
+    m_heartbeat->start();
+    connect(m_robotManager, &RobotManager::robotConnectionStateChanged, this,
+            [this](const RobotId &id, RobotConnectionState) { if (id == m_currentId) refreshEnabled(); });
+    refreshEnabled();
 }
 
-void MotorControlWidget::setCurrentRobot(const RobotId &id) { m_currentId = id; }
+void MotorControlWidget::setCurrentRobot(const RobotId &id) {
+    if (id != m_currentId) releaseControl();
+    m_currentId = id;
+    refreshEnabled();
+}
 
 void MotorControlWidget::onSpeedChanged() {
     if (m_currentId.isEmpty()) return;
     m_leftLabel->setText(QString::number(m_leftSlider->value()));
     m_rightLabel->setText(QString::number(m_rightSlider->value()));
-    auto *r = m_robotManager->robot(m_currentId);
-    if (r) r->setMotorSpeeds(m_leftSlider->value() / 1000.0, m_rightSlider->value() / 1000.0);
+    sendSpeeds(m_leftSlider->value() / 1000.0, m_rightSlider->value() / 1000.0);
 }
 
 void MotorControlWidget::onJoystickSpeed(double left, double right) {
     if (m_currentId.isEmpty()) return;
-    auto *r = m_robotManager->robot(m_currentId);
-    if (r) r->setMotorSpeeds(left / 1000.0, right / 1000.0);
+    sendSpeeds(left / 1000.0, right / 1000.0);
 }
 
 void MotorControlWidget::onStop() {
-    m_leftSlider->setValue(0);
-    m_rightSlider->setValue(0);
-    m_joystick->reset();
-    if (auto *r = m_robotManager->robot(m_currentId)) r->stop();
+    sendSpeeds(0, 0);
+    releaseControl(false);
 }
+
+void MotorControlWidget::sendSpeeds(double left, double right) {
+    auto *robot = m_robotManager->robot(m_currentId);
+    if (!robot || robot->state() != RobotConnectionState::Connected) return;
+    m_activeSpeeds = {left, right};
+    m_moving = left != 0 || right != 0;
+    emit manualCommandRequested(m_currentId, left, right);
+}
+
+void MotorControlWidget::releaseControl(bool sendStop) {
+    if (sendStop && m_moving) sendSpeeds(0, 0);
+    m_moving = false;
+    m_activeSpeeds = {};
+    const QSignalBlocker left(m_leftSlider), right(m_rightSlider), joystick(m_joystick);
+    m_leftSlider->setValue(0); m_rightSlider->setValue(0);
+    m_leftSpin->setValue(0); m_rightSpin->setValue(0);
+    m_leftLabel->setText("0"); m_rightLabel->setText("0");
+    m_joystick->reset();
+}
+
+void MotorControlWidget::refreshEnabled() {
+    auto *r = m_robotManager->robot(m_currentId);
+    const bool online = r && r->state() == RobotConnectionState::Connected;
+    if (!online) releaseControl(false);
+    m_tabWidget->setEnabled(online);
+}
+void MotorControlWidget::hideEvent(QHideEvent *event) { releaseControl(); QWidget::hideEvent(event); }

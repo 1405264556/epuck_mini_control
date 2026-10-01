@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(epuck_mini_control VERSION 0.4.0 LANGUAGES CXX)
+project(epuck_mini_control VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,7 +10,7 @@ set(CMAKE_AUTOUIC ON)
 
 # ---- Qt6 ----
 find_package(Qt6 6.5 REQUIRED COMPONENTS
-    Core Gui Widgets Bluetooth SerialPort Charts Network Test
+    Core Gui Widgets Bluetooth SerialPort Charts Network Test Concurrent
 )
 qt_standard_project_setup()
 

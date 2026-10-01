@@ -6,6 +6,7 @@
 #include "core/RobotInstance.h"
 #include "control/MultiRobotCoordinator.h"
 #include "control/PathPlanner.h"
+#include "control/PathPlanningJob.h"
 #include <QComboBox>
 #include <QDir>
 #include <QDoubleSpinBox>
@@ -26,6 +27,9 @@
 #include <QTabWidget>
 #include <QTemporaryFile>
 #include <QVBoxLayout>
+#include <QScrollArea>
+#include <QStyle>
+#include <QGridLayout>
 
 RobotControlPanel::RobotControlPanel(RobotManager *robotMgr,
                                      MultiRobotCoordinator *coordinator,
@@ -37,20 +41,16 @@ RobotControlPanel::RobotControlPanel(RobotManager *robotMgr,
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(4, 4, 4, 4);
 
-    m_modeCombo = new QComboBox;
-    m_modeCombo->addItem("单机器人控制");
-    m_modeCombo->addItem("多机器人控制");
-    layout->addWidget(m_modeCombo);
-
     m_modeStack = new QStackedWidget;
     m_modeStack->addWidget(createSingleRobotPage());
     m_modeStack->addWidget(createMultiRobotPage());
-    layout->addWidget(m_modeStack);
-
-    connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            m_modeStack, &QStackedWidget::setCurrentIndex);
-    connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &RobotControlPanel::refreshRobotSummary);
+    layout->addWidget(m_modeStack, 1);
+    connect(m_motorWidget, &MotorControlWidget::manualCommandRequested, this,
+            [this](const RobotId &id, double left, double right) {
+        if (m_coordinator) m_coordinator->manualDrive({{id, {left, right}}});
+    });
+    if (m_coordinator) connect(m_coordinator, &MultiRobotCoordinator::coordinationStarted,
+        this, [this]() { m_motorWidget->releaseControl(false); });
     connect(m_robotManager, &RobotManager::selectedRobotChanged,
             this, &RobotControlPanel::onSelectionChanged);
     connect(m_robotManager, &RobotManager::robotConnectionStateChanged,
@@ -60,14 +60,18 @@ RobotControlPanel::RobotControlPanel(RobotManager *robotMgr,
     connect(m_robotManager, &RobotManager::robotRemoved,
             this, [this](const RobotId &) { refreshRobotSummary(); });
 
-    refreshRobotSummary();
+    onSelectionChanged(m_robotManager->selectedRobotId());
 }
 
 QWidget *RobotControlPanel::createSingleRobotPage() {
     auto *page = new QWidget;
     auto *layout = new QVBoxLayout(page);
 
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setContentsMargins(4, 4, 4, 4);
+
     m_singleSummary = new QLabel("未选择机器人");
+    m_singleSummary->setWordWrap(true);
     layout->addWidget(m_singleSummary);
 
     m_singleTabs = new QTabWidget;
@@ -92,6 +96,13 @@ QWidget *RobotControlPanel::createSingleRobotPage() {
     m_goalYSpin->setSuffix(" cm");
     goalForm->addRow("目标 X:", m_goalXSpin);
     goalForm->addRow("目标 Y:", m_goalYSpin);
+    auto invalidateGoal = [this]() {
+        if (m_planningJob) { delete m_planningJob; m_planningJob = nullptr; }
+        m_lastPlannedPath.clear();
+        if (m_startPathBtn) m_startPathBtn->setEnabled(false);
+    };
+    connect(m_goalXSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, invalidateGoal);
+    connect(m_goalYSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, invalidateGoal);
     pathLayout->addWidget(goalBox);
 
     auto *algoBox = new QGroupBox("规划算法");
@@ -113,30 +124,30 @@ QWidget *RobotControlPanel::createSingleRobotPage() {
     algoLayout->addLayout(scriptRow);
     pathLayout->addWidget(algoBox);
 
-    auto *pathBtns = new QHBoxLayout;
+    auto *pathBtns = new QGridLayout;
     auto *pickGoalBtn = new QPushButton("地图选点");
     auto *obstacleBtn = new QPushButton("添加障碍");
     auto *planBtn = new QPushButton("规划路径");
     m_startPathBtn = new QPushButton("开始跟踪");
     m_startPathBtn->setEnabled(false);
-    pathBtns->addWidget(pickGoalBtn);
-    pathBtns->addWidget(obstacleBtn);
-    pathBtns->addWidget(planBtn);
-    pathBtns->addWidget(m_startPathBtn);
+    pathBtns->addWidget(pickGoalBtn, 0, 0);
+    pathBtns->addWidget(obstacleBtn, 0, 1);
+    pathBtns->addWidget(planBtn, 1, 0);
+    pathBtns->addWidget(m_startPathBtn, 1, 1);
     pathLayout->addLayout(pathBtns);
 
-    auto *runBtns = new QHBoxLayout;
+    auto *runBtns = new QGridLayout;
     auto *pauseBtn = new QPushButton("暂停");
     auto *resumeBtn = new QPushButton("继续");
     auto *returnBtn = new QPushButton("回原点");
     auto *clearBtn = new QPushButton("清理画布");
-    runBtns->addWidget(pauseBtn);
-    runBtns->addWidget(resumeBtn);
-    runBtns->addWidget(returnBtn);
-    runBtns->addWidget(clearBtn);
+    runBtns->addWidget(pauseBtn, 0, 0);
+    runBtns->addWidget(resumeBtn, 0, 1);
+    runBtns->addWidget(returnBtn, 1, 0);
+    runBtns->addWidget(clearBtn, 1, 1);
     pathLayout->addLayout(runBtns);
 
-    m_pathStatus = new QLabel("可输入目标坐标，也可在中央画布选择目标、添加虚拟障碍。");
+    m_pathStatus = new QLabel("未规划路径");
     m_pathStatus->setWordWrap(true);
     pathLayout->addWidget(m_pathStatus);
     pathLayout->addStretch();
@@ -153,23 +164,37 @@ QWidget *RobotControlPanel::createSingleRobotPage() {
     connect(resumeBtn, &QPushButton::clicked, this, &RobotControlPanel::resumePathFollowing);
     connect(returnBtn, &QPushButton::clicked, this, &RobotControlPanel::returnSingleRobotOrigin);
     connect(clearBtn, &QPushButton::clicked, this, &RobotControlPanel::clearCanvas);
-    m_singleTabs->addTab(pathTab, "路径规划");
+    auto *pathScroll = new QScrollArea;
+    pathScroll->setWidgetResizable(true);
+    pathScroll->setFrameShape(QFrame::NoFrame);
+    pathScroll->setWidget(pathTab);
+    m_singleTabs->addTab(pathScroll, "路径规划");
 
     layout->addWidget(m_singleTabs);
-    return page;
+    auto *scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidget(page);
+    return scroll;
 }
 
 QWidget *RobotControlPanel::createMultiRobotPage() {
     auto *page = new QWidget;
     auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(4, 4, 4, 4);
 
     m_multiSummary = new QLabel;
     m_multiSummary->setWordWrap(true);
     layout->addWidget(m_multiSummary);
 
     auto *tabs = new QTabWidget;
-    m_multiDriveWidget = new MultiRobotDriveWidget(m_robotManager);
-    tabs->addTab(m_multiDriveWidget, "同步与分控");
+    m_multiTabs = tabs;
+    m_multiDriveWidget = new MultiRobotDriveWidget(m_robotManager, m_coordinator);
+    auto *driveScroll = new QScrollArea;
+    driveScroll->setWidgetResizable(true);
+    driveScroll->setFrameShape(QFrame::NoFrame);
+    driveScroll->setWidget(m_multiDriveWidget);
+    tabs->addTab(driveScroll, "同步与分控");
 
     auto *coordinationPage = new QWidget;
     auto *coordinationLayout = new QVBoxLayout(coordinationPage);
@@ -250,7 +275,11 @@ QWidget *RobotControlPanel::createMultiRobotPage() {
     btnRow->addWidget(stopBtn);
     coordinationLayout->addLayout(btnRow);
     coordinationLayout->addStretch();
-    tabs->addTab(coordinationPage, "协调算法");
+    auto *coordinationScroll = new QScrollArea;
+    coordinationScroll->setWidgetResizable(true);
+    coordinationScroll->setFrameShape(QFrame::NoFrame);
+    coordinationScroll->setWidget(coordinationPage);
+    tabs->addTab(coordinationScroll, "协调算法");
     layout->addWidget(tabs, 1);
 
     connect(startFormationBtn, &QPushButton::clicked, this, &RobotControlPanel::startFormationControl);
@@ -261,6 +290,8 @@ QWidget *RobotControlPanel::createMultiRobotPage() {
 }
 
 void RobotControlPanel::onSelectionChanged(const RobotId &id) {
+    if (id == m_currentId) { refreshRobotSummary(); return; }
+    if (m_planningJob) { delete m_planningJob; m_planningJob = nullptr; }
     m_currentId = id;
     m_motorWidget->setCurrentRobot(id);
     m_ledWidget->setCurrentRobot(id);
@@ -297,139 +328,44 @@ void RobotControlPanel::refreshRobotSummary() {
                             .arg(names.isEmpty() ? QString() : QString("（%1）").arg(names.join("、"))));
 }
 
-QVector<Vec2> RobotControlPanel::planWithBuiltInAStar(const Vec2 &start, const Vec2 &goal) const {
-    constexpr double mapHalfRange = 200.0;
-    PathPlanner planner;
-    planner.setGridSize(static_cast<int>(mapHalfRange * 2), static_cast<int>(mapHalfRange * 2), 1.0);
-
-    QVector<Vec2> shiftedObstacles;
-    shiftedObstacles.reserve(m_virtualObstacles.size());
-    for (const auto &obstacle : m_virtualObstacles) {
-        shiftedObstacles.append(obstacle + Vec2(mapHalfRange, mapHalfRange));
-    }
-    planner.setObstacles(shiftedObstacles, 8.0);
-
-    auto path = planner.smoothPath(
-        planner.findPath(start + Vec2(mapHalfRange, mapHalfRange),
-                         goal + Vec2(mapHalfRange, mapHalfRange)),
-        0.35);
-    for (auto &point : path) {
-        point -= Vec2(mapHalfRange, mapHalfRange);
-    }
-    return path;
-}
-
-QVector<Vec2> RobotControlPanel::planWithExternalScript(const Vec2 &start, const Vec2 &goal) const {
-    const QString scriptPath = m_scriptPathEdit->text().trimmed();
-    if (scriptPath.isEmpty()) {
-        const_cast<QLabel *>(m_pathStatus)->setText("请先选择 Python 或 MATLAB 路径规划脚本。");
-        return {};
-    }
-
-    QJsonObject root;
-    root["start"] = QJsonArray{start.x, start.y};
-    root["goal"] = QJsonArray{goal.x, goal.y};
-    QJsonArray obstacles;
-    for (const auto &obstacle : m_virtualObstacles) {
-        obstacles.append(QJsonArray{obstacle.x, obstacle.y});
-    }
-    root["obstacles"] = obstacles;
-    root["bounds"] = QJsonArray{-200.0, 200.0, -200.0, 200.0};
-    root["obstacle_radius"] = 8.0;
-
-    QTemporaryFile inputFile(QDir::tempPath() + "/epuck_planner_XXXXXX.json");
-    if (!inputFile.open()) {
-        const_cast<QLabel *>(m_pathStatus)->setText("无法创建路径规划临时输入文件。");
-        return {};
-    }
-    inputFile.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
-    inputFile.flush();
-
-    const QString mode = m_algorithmCombo->currentData().toString();
-    QString program;
-    QStringList args;
-    if (mode == "python") {
-        program = "python";
-        args << scriptPath << inputFile.fileName();
-    } else {
-        program = "matlab";
-        const QFileInfo info(scriptPath);
-        const QString functionName = info.completeBaseName();
-        const QString batch = QString(
-            "addpath('%1'); data=jsondecode(fileread('%2')); path=%3(data); disp(jsonencode(path));")
-            .arg(QDir::toNativeSeparators(info.absolutePath()).replace("\\", "/"),
-                 QDir::toNativeSeparators(inputFile.fileName()).replace("\\", "/"),
-                 functionName);
-        args << "-batch" << batch;
-    }
-
-    QProcess process;
-    process.start(program, args);
-    if (!process.waitForFinished(30000)) {
-        process.kill();
-        const_cast<QLabel *>(m_pathStatus)->setText("外部路径规划脚本超时。");
-        return {};
-    }
-    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
-        const QString err = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
-        const_cast<QLabel *>(m_pathStatus)->setText(QString("外部路径规划失败：%1").arg(err.left(160)));
-        return {};
-    }
-
-    const QByteArray output = process.readAllStandardOutput().trimmed();
-    const int firstBracket = output.indexOf('[');
-    const int lastBracket = output.lastIndexOf(']');
-    if (firstBracket < 0 || lastBracket <= firstBracket) {
-        const_cast<QLabel *>(m_pathStatus)->setText("外部脚本未输出路径 JSON 数组。");
-        return {};
-    }
-    QJsonParseError parseError;
-    const auto doc = QJsonDocument::fromJson(output.mid(firstBracket, lastBracket - firstBracket + 1), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !doc.isArray()) {
-        const_cast<QLabel *>(m_pathStatus)->setText(QString("路径 JSON 解析失败：%1").arg(parseError.errorString()));
-        return {};
-    }
-
-    QVector<Vec2> path;
-    for (const auto &value : doc.array()) {
-        const auto point = value.toArray();
-        if (point.size() >= 2) {
-            path.append(Vec2(point.at(0).toDouble(), point.at(1).toDouble()));
-        }
-    }
-    return path;
-}
-
 void RobotControlPanel::planSingleRobotPath() {
+    const bool returnToOrigin = m_returnAfterPlan;
+    m_returnAfterPlan = false;
     auto *robot = m_robotManager->robot(m_currentId);
     if (!robot || robot->state() != RobotConnectionState::Connected) {
-        m_pathStatus->setText("请先选择并连接一台机器人。");
-        m_startPathBtn->setEnabled(false);
+        m_pathStatus->setText("请先连接机器人");
         return;
     }
-
-    const Vec2 start = robot->position();
-    const Vec2 goal(m_goalXSpin->value(), m_goalYSpin->value());
-    const QString mode = m_algorithmCombo->currentData().toString();
-    m_lastPlannedPath = (mode == "builtin")
-        ? planWithBuiltInAStar(start, goal)
-        : planWithExternalScript(start, goal);
-
-    if (m_lastPlannedPath.isEmpty()) {
-        m_pathStatus->setText("未找到可用路径，请调整目标点、障碍物或算法脚本。");
-        m_startPathBtn->setEnabled(false);
-        return;
-    }
-
-    m_pathStatus->setText(QString("路径规划完成，共 %1 个路径点，障碍物 %2 个。")
-                          .arg(m_lastPlannedPath.size())
-                          .arg(m_virtualObstacles.size()));
-    m_startPathBtn->setEnabled(true);
-    emit pathPlanned(m_currentId, m_lastPlannedPath);
+    if (m_planningJob) { delete m_planningJob; m_planningJob = nullptr; }
+    const RobotId plannedId = m_currentId;
+    m_lastPlannedPath.clear();
+    m_startPathBtn->setEnabled(false);
+    m_pathStatus->setText("正在规划路径…");
+    auto *job = new PathPlanningJob(this);
+    m_planningJob = job;
+    connect(job, &PathPlanningJob::finished, this,
+            [this, job, plannedId, returnToOrigin](const QVector<Vec2> &path, const QString &error) {
+        if (m_planningJob != job) return;
+        m_planningJob = nullptr;
+        job->deleteLater();
+        if (plannedId != m_currentId) return;
+        if (!error.isEmpty() || path.size() < 2) {
+            m_pathStatus->setText(error.isEmpty() ? "未找到可用路径" : error);
+            return;
+        }
+        m_lastPlannedPath = path;
+        m_startPathBtn->setEnabled(true);
+        m_pathStatus->setText(QString("路径已生成 · %1 个点").arg(path.size()));
+        emit pathPlanned(plannedId, path);
+        if (returnToOrigin) startSingleRobotPath();
+    });
+    job->start(robot->position(), {m_goalXSpin->value(), m_goalYSpin->value()},
+               m_virtualObstacles, m_algorithmCombo->currentData().toString(), m_scriptPathEdit->text().trimmed());
 }
 
 void RobotControlPanel::startSingleRobotPath() {
     if (m_currentId.isEmpty() || m_lastPlannedPath.isEmpty() || !m_coordinator) return;
+    stopManualControls();
     QMap<RobotId, QVector<Vec2>> paths;
     paths[m_currentId] = m_lastPlannedPath;
     m_coordinator->startPathFollowing(paths);
@@ -470,12 +406,12 @@ void RobotControlPanel::resumePathFollowing() {
 void RobotControlPanel::returnSingleRobotOrigin() {
     m_goalXSpin->setValue(0);
     m_goalYSpin->setValue(0);
+    m_returnAfterPlan = true;
     planSingleRobotPath();
-    startSingleRobotPath();
-    m_pathStatus->setText("已规划并启动回原点路径。");
 }
 
 void RobotControlPanel::clearCanvas() {
+    if (m_planningJob) { delete m_planningJob; m_planningJob = nullptr; }
     m_lastPlannedPath.clear();
     if (m_startPathBtn) m_startPathBtn->setEnabled(false);
     emit canvasClearRequested();
@@ -483,6 +419,11 @@ void RobotControlPanel::clearCanvas() {
 }
 
 void RobotControlPanel::setGoalFromCanvas(const Vec2 &pos) {
+    if (m_modeStack->currentIndex() == 1) {
+        m_targetXSpin->setValue(pos.x);
+        m_targetYSpin->setValue(pos.y);
+        return;
+    }
     m_goalXSpin->setValue(pos.x);
     m_goalYSpin->setValue(pos.y);
     m_pathStatus->setText(QString("已选择目标点：X=%1 cm, Y=%2 cm。")
@@ -492,18 +433,22 @@ void RobotControlPanel::setGoalFromCanvas(const Vec2 &pos) {
 }
 
 void RobotControlPanel::setVirtualObstacles(const QVector<Vec2> &obstacles) {
+    if (m_planningJob) { delete m_planningJob; m_planningJob = nullptr; }
+    m_lastPlannedPath.clear();
+    m_startPathBtn->setEnabled(false);
     m_virtualObstacles = obstacles;
     m_pathStatus->setText(QString("已设置 %1 个虚拟障碍。").arg(m_virtualObstacles.size()));
 }
 
 void RobotControlPanel::startFormationControl() {
-    const auto ids = connectedRobotIds();
+    const auto ids = m_multiDriveWidget->selectedRobotIds();
     if (ids.size() < 2) {
         m_multiSummary->setText("编队控制至少需要 2 台已连接机器人。");
         return;
     }
 
     if (!m_coordinator) return;
+    stopManualControls();
     const Vec2 target(m_targetXSpin->value(), m_targetYSpin->value());
     const QString mode = m_coordinationModeCombo->currentData().toString();
     if (mode == "flocking") {
@@ -520,6 +465,18 @@ void RobotControlPanel::startFormationControl() {
         m_coordinator->startFormation(shape, ids, m_spacingSpin->value(), target);
     }
     refreshRobotSummary();
+}
+
+void RobotControlPanel::setControlMode(int mode) {
+    stopManualControls();
+    m_modeStack->setCurrentIndex(mode == 1 ? 1 : 0);
+    refreshRobotSummary();
+}
+
+void RobotControlPanel::showCoordinationPage() { m_multiTabs->setCurrentIndex(1); }
+void RobotControlPanel::stopManualControls() {
+    m_motorWidget->releaseControl();
+    m_multiDriveWidget->stopManualControl();
 }
 
 void RobotControlPanel::stopCoordination() {

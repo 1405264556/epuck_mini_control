@@ -6,6 +6,7 @@
 #include "MultiRobotStrategyRegistry.h"
 #include "core/RobotManager.h"
 #include "core/RobotInstance.h"
+#include "comm/SerialManager.h"
 #include "util/MathUtils.h"
 #include <QCoreApplication>
 #include <QDateTime>
@@ -33,6 +34,16 @@ MultiRobotCoordinator::MultiRobotCoordinator(RobotManager *robotManager, QObject
     connect(m_strategyRegistry, &MultiRobotStrategyRegistry::strategiesChanged,
             this, &MultiRobotCoordinator::strategyPluginsChanged);
     reloadStrategyPlugins();
+    connect(m_robotManager, &RobotManager::robotConnectionStateChanged, this,
+            [this](const RobotId &id, RobotConnectionState state) {
+        if (m_active && m_participants.contains(id) && state != RobotConnectionState::Connected) {
+            stopAll();
+            emit strategyError(QString("%1 连接状态变化，协调控制已停止").arg(id));
+        }
+    });
+    connect(m_robotManager, &RobotManager::robotRemoved, this, [this](const RobotId &id) {
+        if (m_participants.contains(id)) stopAll();
+    });
 }
 
 void MultiRobotCoordinator::startFormation(FormationShape shape, const QList<RobotId> &robotIds,
@@ -51,6 +62,7 @@ void MultiRobotCoordinator::startFormation(FormationShape shape, const QList<Rob
     }
     if (robots.isEmpty()) return;
 
+    for (auto *robot : robots) m_participants.append(robot->id());
     m_formationController->start(robots);
     m_active = true;
     m_paused = false;
@@ -72,6 +84,7 @@ void MultiRobotCoordinator::startFlocking(const QList<RobotId> &robotIds, const 
     }
     if (robots.isEmpty()) return;
 
+    for (auto *robot : robots) m_participants.append(robot->id());
     m_flockingController->start(robots);
     m_active = true;
     m_paused = false;
@@ -81,7 +94,15 @@ void MultiRobotCoordinator::startFlocking(const QList<RobotId> &robotIds, const 
 
 void MultiRobotCoordinator::startPathFollowing(const QMap<RobotId, QVector<Vec2>> &robotPaths) {
     stopAll();
-    m_activePaths = robotPaths;
+    m_activePaths.clear();
+    for (auto it = robotPaths.cbegin(); it != robotPaths.cend(); ++it) {
+        auto *robot = m_robotManager->robot(it.key());
+        if (robot && robot->state() == RobotConnectionState::Connected && it->size() >= 2) {
+            m_activePaths.insert(it.key(), it.value());
+            m_participants.append(it.key());
+        }
+    }
+    if (m_activePaths.isEmpty()) return;
     m_pathProgress.clear();
     for (auto it = robotPaths.begin(); it != robotPaths.end(); ++it) {
         m_pathProgress[it.key()] = 0;
@@ -110,6 +131,7 @@ bool MultiRobotCoordinator::startStrategy(const QString &strategyId,
         }
     }
     if (m_strategyRobotIds.isEmpty()) return false;
+    m_participants = m_strategyRobotIds;
 
     m_strategyParameters = parameters;
     strategy->configure(parameters);
@@ -176,6 +198,8 @@ void MultiRobotCoordinator::stopAll() {
     m_strategyParameters.clear();
     m_activePaths.clear();
     m_pathProgress.clear();
+    m_participants.clear();
+    m_pendingCommands.clear();
     if (wasActive) {
         for (auto *robot : m_robotManager->connectedRobots()) robot->stop();
         emit coordinationStopped();
@@ -189,13 +213,30 @@ void MultiRobotCoordinator::emergencyStop() {
 
 bool MultiRobotCoordinator::isActive() const { return m_active; }
 
+void MultiRobotCoordinator::manualDrive(const QMap<RobotId, WheelSpeeds> &commands) {
+    if (m_active) stopAll();
+    m_pendingCommands = commands;
+    flushMotorCommands();
+}
+
 void MultiRobotCoordinator::controlLoop() {
     if (!m_active) return;
+    m_pendingCommands.clear();
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    for (const auto &id : m_participants) {
+        auto *robot = m_robotManager->robot(id);
+        if (!robot || !robot->latestSensorData().isFresh(SensorData::Encoders, now, 1000)) {
+            pause();
+            emit strategyError(QString("%1 编码器反馈缺失或过期，协调控制已暂停").arg(id));
+            return;
+        }
+    }
 
     if (m_activeStrategy) {
         QElapsedTimer timer;
         timer.start();
         const auto output = m_activeStrategy->step(buildWorldState(0.05));
+        for (const auto &id : m_strategyRobotIds) sendMotorCommand(id, 0, 0);
         for (auto it = output.wheelSpeeds.cbegin(); it != output.wheelSpeeds.cend(); ++it) {
             if (!m_strategyRobotIds.contains(it.key())) continue;
             sendMotorCommand(it.key(), math::clamp(it.value().left, -1.0, 1.0),
@@ -205,6 +246,7 @@ void MultiRobotCoordinator::controlLoop() {
             emit strategyError(QString("算法 %1 单周期耗时 %2 ms，接近 50 ms 控制周期")
                 .arg(m_activeStrategy->displayName()).arg(timer.elapsed()));
         }
+        flushMotorCommands();
         return;
     }
 
@@ -222,14 +264,14 @@ void MultiRobotCoordinator::controlLoop() {
                 double heading = atan2(target.y - pos.y, target.x - pos.x);
 
                 // Simple P controller for position tracking
-                double linearVel = math::clamp(dist * 0.5, -10.0, 10.0);
+                double linearVel = math::clamp(dist * 0.5, 0.0, 8.0);
                 double headingError = math::normalizeAngle(heading - r->heading());
                 double angularVel = math::clamp(headingError * 2.0, -4.0, 4.0);
 
-                auto ws = math::unicycleToWheelSpeeds(linearVel, angularVel, 2.0, 5.0);
+                linearVel *= qMax(0.0, std::cos(headingError));
+                if (dist < 2.0) { linearVel = 0; angularVel = 0; }
+                auto ws = math::unicycleToWheelSpeeds(linearVel, angularVel, 12.88, 5.3);
                 sendMotorCommand(it.key(), ws.left, ws.right);
-                r->setPosition(pos + Vec2(linearVel * 0.05 * cos(heading),
-                                           linearVel * 0.05 * sin(heading)), heading);
             }
         }
     }
@@ -258,11 +300,17 @@ void MultiRobotCoordinator::controlLoop() {
         Vec2 pos = r->position();
         Vec2 target = path[progress + 1];
         double dist = pos.distanceTo(target);
+        if (progress + 1 == path.size() - 1 && dist < 2.0) {
+            sendMotorCommand(id, 0, 0);
+            completedPaths.append(id);
+            continue;
+        }
 
         if (dist < 5.0 && progress + 2 < path.size()) {
             progress++;
             m_pathProgress[id] = progress;
             target = path[progress + 1];
+            dist = pos.distanceTo(target);
         }
 
         double heading = atan2(target.y - pos.y, target.x - pos.x);
@@ -270,15 +318,18 @@ void MultiRobotCoordinator::controlLoop() {
         double headingError = math::normalizeAngle(heading - r->heading());
         double angularVel = math::clamp(headingError * 2.0, -4.0, 4.0);
 
-        auto ws = math::unicycleToWheelSpeeds(linearVel, angularVel, 2.0, 5.0);
+        linearVel *= qMax(0.0, std::cos(headingError));
+        auto ws = math::unicycleToWheelSpeeds(linearVel, angularVel, 12.88, 5.3);
         sendMotorCommand(id, ws.left, ws.right);
-        r->setPosition(pos + Vec2(linearVel * 0.05 * cos(heading),
-                                   linearVel * 0.05 * sin(heading)), heading);
     }
     for (const auto &id : completedPaths) {
         m_activePaths.remove(id);
         m_pathProgress.remove(id);
+        m_participants.removeAll(id);
     }
+    flushMotorCommands();
+    if (!completedPaths.isEmpty() && m_activePaths.isEmpty()
+        && !m_formationController->isRunning() && !m_flockingController->isRunning()) stopAll();
 }
 
 MultiRobotWorldState MultiRobotCoordinator::buildWorldState(double dt) const {
@@ -304,7 +355,21 @@ MultiRobotWorldState MultiRobotCoordinator::buildWorldState(double dt) const {
 void MultiRobotCoordinator::sendMotorCommand(const RobotId &id, double leftSpeed, double rightSpeed) {
     if (auto *r = m_robotManager->robot(id);
         r && r->state() == RobotConnectionState::Connected) {
-        r->setMotorSpeeds(leftSpeed, rightSpeed);
-        emit robotCommandIssued(id, leftSpeed, rightSpeed);
+        m_pendingCommands[id] = {leftSpeed, rightSpeed};
     }
+}
+
+void MultiRobotCoordinator::flushMotorCommands() {
+    QMap<SerialManager *, QMap<RobotId, WheelSpeeds>> batches;
+    for (auto it = m_pendingCommands.cbegin(); it != m_pendingCommands.cend(); ++it) {
+        auto *robot = m_robotManager->robot(it.key());
+        if (!robot || robot->state() != RobotConnectionState::Connected) continue;
+        const double left = std::isfinite(it->left) ? qBound(-1.0, it->left, 1.0) : 0;
+        const double right = std::isfinite(it->right) ? qBound(-1.0, it->right, 1.0) : 0;
+        robot->recordMotorCommand(left, right);
+        if (robot->serialManager()) batches[robot->serialManager()][it.key()] = {left, right};
+        emit robotCommandIssued(it.key(), left, right);
+    }
+    for (auto it = batches.begin(); it != batches.end(); ++it) it.key()->writeMotorBatch(it.value());
+    m_pendingCommands.clear();
 }

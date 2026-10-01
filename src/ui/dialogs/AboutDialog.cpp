@@ -12,7 +12,7 @@ AboutDialog::AboutDialog(QWidget *parent) : QDialog(parent) {
     title->setAlignment(Qt::AlignCenter);
     layout->addWidget(title);
 
-    layout->addWidget(new QLabel("Version 0.4.0"));
+    layout->addWidget(new QLabel("Version 0.5.0"));
     layout->addWidget(new QLabel("EPFL e-puck Mini 教学科研移动机器人上位机控制软件。"));
     layout->addWidget(new QLabel("支持多串口并发通信、同步/分控、路径规划和协调算法插件。"));
     layout->addStretch();

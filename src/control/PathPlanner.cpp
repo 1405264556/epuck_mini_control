@@ -2,6 +2,7 @@
 #include <queue>
 #include <unordered_map>
 #include <cmath>
+#include <algorithm>
 
 struct PathPlanner::Node {
     int x, y;
@@ -13,14 +14,15 @@ struct PathPlanner::Node {
 PathPlanner::PathPlanner(QObject *parent) : QObject(parent) {}
 
 void PathPlanner::setGridSize(int w, int h, double r) {
-    m_gridWidth = w; m_gridHeight = h; m_resolution = r;
+    m_gridWidth = std::max(1, w); m_gridHeight = std::max(1, h); m_resolution = std::max(0.01, r);
     m_occupancyGrid.resize(h);
-    for (auto &row : m_occupancyGrid) row.resize(w);
+    for (auto &row : m_occupancyGrid) { row.resize(m_gridWidth); row.fill(false); }
 }
 
 void PathPlanner::setObstacles(const QVector<Vec2> &obstacles, double radius) {
     // Inflate obstacles
-    int fillR = std::max(1, static_cast<int>(radius / m_resolution));
+    clearObstacles();
+    int fillR = std::max(0, static_cast<int>(std::ceil(radius / m_resolution)));
     for (const auto &obs : obstacles) {
         int cx = static_cast<int>(obs.x / m_resolution);
         int cy = static_cast<int>(obs.y / m_resolution);
@@ -41,78 +43,54 @@ void PathPlanner::clearObstacles() {
 }
 
 QVector<Vec2> PathPlanner::findPath(const Vec2 &start, const Vec2 &goal) {
-    int sx = static_cast<int>(start.x / m_resolution);
-    int sy = static_cast<int>(start.y / m_resolution);
-    int gx = static_cast<int>(goal.x / m_resolution);
-    int gy = static_cast<int>(goal.y / m_resolution);
-
-    if (sx < 0 || sx >= m_gridWidth || sy < 0 || sy >= m_gridHeight) return {};
-    if (gx < 0 || gx >= m_gridWidth || gy < 0 || gy >= m_gridHeight) return {};
-    if (!m_occupancyGrid.empty() && (m_occupancyGrid[sy][sx] || m_occupancyGrid[gy][gx])) return {};
-
-    // 8-connected grid
-    const int dx[8] = {1, 1, 0, -1, -1, -1, 0, 1};
-    const int dy[8] = {0, 1, 1, 1, 0, -1, -1, -1};
-    const double cost[8] = {1.0, 1.414, 1.0, 1.414, 1.0, 1.414, 1.0, 1.414};
-
-    using NodeId = int; // y * width + x
-    std::unordered_map<NodeId, Node> nodes;
-    auto id = [this](int x, int y) { return y * m_gridWidth + x; };
-
-    // Comparator for priority queue (min-heap by f-cost)
-    auto cmp = [](Node *a, Node *b) { return a->f > b->f; };
-    std::priority_queue<Node *, std::vector<Node *>, decltype(cmp)> open(cmp);
-
-    auto heuristic = [](int x1, int y1, int x2, int y2) -> double {
-        return std::sqrt(static_cast<double>((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2)));
+    if (m_occupancyGrid.empty()) setGridSize(m_gridWidth, m_gridHeight, m_resolution);
+    if (m_resolution <= 0 || !std::isfinite(start.x) || !std::isfinite(start.y)
+        || !std::isfinite(goal.x) || !std::isfinite(goal.y)) return {};
+    const int sx = static_cast<int>(std::floor(start.x/m_resolution));
+    const int sy = static_cast<int>(std::floor(start.y/m_resolution));
+    const int gx = static_cast<int>(std::floor(goal.x/m_resolution));
+    const int gy = static_cast<int>(std::floor(goal.y/m_resolution));
+    auto blocked = [this](int x, int y) {
+        return x < 0 || y < 0 || x >= m_gridWidth || y >= m_gridHeight || m_occupancyGrid[y][x];
     };
-
-    Node &startNode = nodes[id(sx, sy)];
-    startNode.x = sx; startNode.y = sy; startNode.g = 0;
-    startNode.h = heuristic(sx, sy, gx, gy);
-    startNode.f = startNode.h;
-    open.push(&startNode);
-
-    QVector<Vec2> path;
-    NodeId goalId = id(gx, gy);
-
+    if (blocked(sx, sy) || blocked(gx, gy)) return {};
+    const int count = m_gridWidth*m_gridHeight;
+    std::vector<double> costs(count, 1e18);
+    std::vector<int> parents(count, -1);
+    std::vector<bool> closed(count, false);
+    struct Entry { int id; double g, f; };
+    auto compare = [](const Entry &a, const Entry &b) { return a.f > b.f; };
+    std::priority_queue<Entry, std::vector<Entry>, decltype(compare)> open(compare);
+    auto heuristic = [gx, gy](int x, int y) { return std::hypot(x-gx, y-gy); };
+    const int startId = sy*m_gridWidth+sx, goalId = gy*m_gridWidth+gx;
+    costs[startId] = 0;
+    open.push({startId, 0, heuristic(sx, sy)});
+    const int dx[] = {1,1,0,-1,-1,-1,0,1}, dy[] = {0,1,1,1,0,-1,-1,-1};
     while (!open.empty()) {
-        Node *current = open.top(); open.pop();
-
-        if (current->x == gx && current->y == gy) {
-            // Reconstruct path
-            while (current) {
-                path.prepend(Vec2(current->x * m_resolution, current->y * m_resolution));
-                current = current->parent;
-            }
+        const Entry current = open.top(); open.pop();
+        if (closed[current.id] || current.g != costs[current.id]) continue;
+        if (current.id == goalId) {
+            QVector<Vec2> path;
+            for (int id = goalId; id >= 0; id = parents[id])
+                path.append({(id%m_gridWidth)*m_resolution, (id/m_gridWidth)*m_resolution});
+            std::reverse(path.begin(), path.end());
             return path;
         }
-
+        closed[current.id] = true;
+        const int x = current.id%m_gridWidth, y = current.id/m_gridWidth;
         for (int i = 0; i < 8; ++i) {
-            int nx = current->x + dx[i], ny = current->y + dy[i];
-            if (nx < 0 || nx >= m_gridWidth || ny < 0 || ny >= m_gridHeight) continue;
-            if (!m_occupancyGrid.empty() && m_occupancyGrid[ny][nx]) continue;
-
-            double newG = current->g + cost[i];
-            NodeId nid = id(nx, ny);
-            auto it = nodes.find(nid);
-            if (it == nodes.end()) {
-                Node &neighbor = nodes[nid];
-                neighbor.x = nx; neighbor.y = ny;
-                neighbor.parent = current;
-                neighbor.g = newG;
-                neighbor.h = heuristic(nx, ny, gx, gy);
-                neighbor.f = neighbor.g + neighbor.h;
-                open.push(&neighbor);
-            } else if (newG < it->second.g) {
-                it->second.g = newG;
-                it->second.parent = current;
-                it->second.f = newG + it->second.h;
-            }
+            const int nx = x+dx[i], ny = y+dy[i];
+            if (blocked(nx, ny)) continue;
+            if (dx[i] && dy[i] && (blocked(x+dx[i], y) || blocked(x, y+dy[i]))) continue;
+            const int next = ny*m_gridWidth+nx;
+            const double candidate = current.g + (dx[i] && dy[i] ? std::sqrt(2.0) : 1.0);
+            if (closed[next] || candidate >= costs[next]) continue;
+            costs[next] = candidate;
+            parents[next] = current.id;
+            open.push({next, candidate, candidate+heuristic(nx, ny)});
         }
     }
-
-    return path; // No path found
+    return {};
 }
 
 QVector<Vec2> PathPlanner::smoothPath(const QVector<Vec2> &path, double factor) {

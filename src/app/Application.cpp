@@ -18,7 +18,7 @@ Application::Application(int &argc, char **argv)
     : QApplication(argc, argv)
 {
     setApplicationName("e-puck Mini Control");
-    setApplicationVersion("0.4.0");
+    setApplicationVersion("0.5.0");
     setOrganizationName("EPFL");
 }
 

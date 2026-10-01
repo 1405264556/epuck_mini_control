@@ -26,9 +26,12 @@ public:
                         MultiRobotCoordinator *coordinator, Settings *settings,
                         QWidget *parent = nullptr);
     ~MainWindow() override;
+    void setControlMode(int mode);
+    int controlMode() const { return m_controlMode; }
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
 private:
     void showConnectDialog();
@@ -69,4 +72,12 @@ private:
     QAction *m_formationAction = nullptr;
     QAction *m_emergencyStopAction = nullptr;
     QAction *m_settingsAction = nullptr;
+    QAction *m_singleModeAction = nullptr;
+    QAction *m_multiModeAction = nullptr;
+    QAction *m_goalAction = nullptr;
+    QAction *m_obstacleAction = nullptr;
+    QLabel *m_onlineLabel = nullptr;
+    QLabel *m_coordinationLabel = nullptr;
+    int m_controlMode = 0;
+    void refreshStatus();
 };

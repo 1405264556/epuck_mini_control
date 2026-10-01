@@ -2,8 +2,8 @@
 #include <QPainter>
 void ToFVisualizer::paintEvent(QPaintEvent *) {
     QPainter p(this);
-    p.fillRect(rect(), QColor("#1e1e2e"));
-    if (!m_data.isValid()) { p.setPen(QColor("#585b70")); p.drawText(rect(), Qt::AlignCenter, "暂无ToF数据"); return; }
+    p.fillRect(rect(), QColor("#ffffff"));
+    if (!m_data.has(SensorData::ToF)) { p.setPen(QColor("#617078")); p.drawText(rect(), Qt::AlignCenter, "ToF 尚未接入"); return; }
     double cellW = width() / 8.0, cellH = height() / 8.0;
     for (int r = 0; r < 8; ++r) {
         for (int c = 0; c < 8; ++c) {

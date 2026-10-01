@@ -14,11 +14,11 @@ public:
     static constexpr uint8_t CMD_MOTOR      = 0xBC; // Set motor speeds
     static constexpr uint8_t CMD_LED        = 0xB4; // Set LED
     static constexpr uint8_t CMD_IMAGE      = 0xB7; // Get camera image
-    static constexpr uint8_t CMD_RAW_ACCEL  = 0xB1; // Read raw accelerometer (cartesian)
-    static constexpr uint8_t CMD_MIC        = 0xF5; // Read microphone volumes (binary)
-    static constexpr uint8_t CMD_GET_MOTOR  = 0xC5; // Get motor speed
-    static constexpr uint8_t CMD_ENCODERS   = 0xD1; // Read encoder steps
-    static constexpr uint8_t CMD_LIGHT      = 0xCE; // Read ambient light
+    static constexpr uint8_t CMD_RAW_ACCEL  = 0x9F; // -'a': raw accelerometer
+    static constexpr uint8_t CMD_MIC        = 0x8B; // -'u': microphone volumes
+    static constexpr uint8_t CMD_GET_MOTOR  = 0xBB; // -'E': motor speed
+    static constexpr uint8_t CMD_ENCODERS   = 0xAF; // -'Q': encoder steps
+    static constexpr uint8_t CMD_LIGHT      = 0xB1; // -'O': ambient light
     static constexpr uint8_t CMD_EXIT_BINARY = 0x00; // Exit binary mode
 
     // ---- LED numbering (matches BTcom.c / e_led.h) ----
@@ -33,6 +33,9 @@ public:
 
     // ---- Command builders ----
     static QByteArray buildSensorPollCommand();  // [CMD_SENSOR, CMD_ACCEL, CMD_EXIT_BINARY]
+    static QByteArray buildTelemetryPollCommand();
+    static bool parseTelemetryResponse(const QByteArray &data, SensorData &out);
+    static bool parseBinaryResponse(uint8_t command, const QByteArray &data, SensorData &out);
     static QByteArray buildMotorCommand(int16_t left, int16_t right);
     static QByteArray buildLEDCommand(int ledNum, int value);
     static QByteArray buildImageCommand();
