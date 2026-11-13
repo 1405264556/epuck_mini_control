@@ -172,8 +172,11 @@ void MultiRobotCoordinator::pause() {
     if (!m_active || m_paused) return;
     m_paused = true;
     m_controlTimer->stop();
-    for (auto *r : m_robotManager->allRobots()) {
-        if (r->state() == RobotConnectionState::Connected) r->stop();
+    // Only the robots this run is driving: a robot outside the group may be under
+    // manual control and must not be stopped by someone else's pause.
+    for (const auto &id : m_participants) {
+        auto *r = m_robotManager->robot(id);
+        if (r && r->state() == RobotConnectionState::Connected) r->stop();
     }
     emit coordinationPaused();
 }

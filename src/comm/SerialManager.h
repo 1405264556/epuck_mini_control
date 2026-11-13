@@ -33,6 +33,13 @@ public:
     bool isRobotConnected(const RobotId &id) const;
     bool isPortActive(const QString &portName) const;
 
+    // Unexpected drops of an established link are retried with a growing delay.
+    void setAutoReconnect(bool enabled, int maxAttempts = 3);
+    bool autoReconnectEnabled() const { return m_autoReconnect; }
+    bool isReconnectPending(const RobotId &id) const { return m_reconnects.contains(id); }
+    void rememberPort(const QString &portName, int baudRate);
+    void setDefaultPollInterval(int intervalMs);
+
     bool writeToRobot(const RobotId &id, const QByteArray &data);
     quint64 writeMotorBatch(const QMap<RobotId, WheelSpeeds> &commands, int leadTimeMs = 12);
     void startSensorPolling(const RobotId &id, int intervalMs = 60);
@@ -46,6 +53,7 @@ signals:
     void scanFinished();
     void robotConnecting(const RobotId &id);
     void robotConnected(const RobotId &id);
+    void robotReconnecting(const RobotId &id, int attempt, int maxAttempts, int delayMs);
     void robotDisconnected(const RobotId &id);
     void sensorDataReceived(const RobotId &id, const SensorData &data);
     void errorOccurred(const RobotId &id, const QString &message);
@@ -61,6 +69,14 @@ private:
         bool connected = false;
         bool closing = false;
     };
+    struct ReconnectState {
+        QString portName;
+        int baudRate = 115200;
+        int attempt = 0;
+        int generation = 0;
+    };
+    bool scheduleReconnect(const RobotId &id, const QString &portName, int baudRate,
+                           const QString &reason);
 
     void cancelScan(bool notifyFinished);
     void handlePortsEnumerated(const std::shared_ptr<SerialScanSession> &session,
@@ -73,6 +89,11 @@ private:
     QMap<RobotId, PortContext> m_contexts;
     QList<BLEDeviceInfo> m_discoveredDevices;
     QMap<QString, int> m_knownBaudRates;
+    QMap<RobotId, ReconnectState> m_reconnects;
+    bool m_autoReconnect = true;
+    int m_maxReconnectAttempts = 3;
+    int m_reconnectGeneration = 0;
+    int m_pollIntervalMs = 60;
     std::shared_ptr<SerialScanSession> m_scanSession;
     QThreadPool m_scanPool;
     int m_scanToken = 0;

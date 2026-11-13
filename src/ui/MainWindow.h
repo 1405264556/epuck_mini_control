@@ -1,11 +1,14 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QSet>
+#include "core/Types.h"
 
 class QDockWidget;
 class QListView;
 class QAction;
 class QLabel;
+class QToolButton;
 
 class RobotManager;
 class SerialManager;
@@ -28,13 +31,18 @@ public:
     ~MainWindow() override;
     void setControlMode(int mode);
     int controlMode() const { return m_controlMode; }
+    void setKeyboardDriveEnabled(bool enabled);
+    bool keyboardDriveEnabled() const { return m_keyboardDrive; }
+    void emergencyStop();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
-    void changeEvent(QEvent *event) override;
+    bool event(QEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void showConnectDialog();
+    void showSettingsDialog();
     bool requestRobotConnection(const QString &id);
     void setupMenuBar();
     void setupToolBar();
@@ -43,6 +51,14 @@ private:
     void setupConnections();
     void saveWindowState();
     void restoreWindowState();
+    void applySettings();
+    void loadKnownDevices();
+    void saveKnownDevices();
+    void refreshStatus();
+    QString robotLabel(const RobotId &id) const;
+    bool handleDriveKey(int key, bool pressed, bool autoRepeat);
+    void releaseDriveKeys();
+    void updateKeyboardDrive();
 
     // Dependencies
     RobotManager *m_robotManager;
@@ -72,12 +88,20 @@ private:
     QAction *m_formationAction = nullptr;
     QAction *m_emergencyStopAction = nullptr;
     QAction *m_settingsAction = nullptr;
+    QAction *m_keyboardAction = nullptr;
     QAction *m_singleModeAction = nullptr;
     QAction *m_multiModeAction = nullptr;
     QAction *m_goalAction = nullptr;
     QAction *m_obstacleAction = nullptr;
+    QToolButton *m_emergencyStopButton = nullptr;
     QLabel *m_onlineLabel = nullptr;
     QLabel *m_coordinationLabel = nullptr;
+    QLabel *m_keyboardLabel = nullptr;
+    QLabel *m_cursorLabel = nullptr;
     int m_controlMode = 0;
-    void refreshStatus();
+    bool m_keyboardDrive = true;
+    bool m_logAtBottom = true;
+    QSet<int> m_driveKeys;
+    QString m_singleSummary;
+    void refreshControlDockTitle();
 };

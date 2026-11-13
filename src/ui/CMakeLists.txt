@@ -1,5 +1,6 @@
 add_library(epuck_ui STATIC
     MainWindow.h MainWindow.cpp
+    Icons.h Icons.cpp
     widgets/RobotListWidget.h widgets/RobotListWidget.cpp
     widgets/SensorDisplayWidget.h widgets/SensorDisplayWidget.cpp
     widgets/ProximityVisualizer.h widgets/ProximityVisualizer.cpp

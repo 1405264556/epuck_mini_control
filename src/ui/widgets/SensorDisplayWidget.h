@@ -42,6 +42,6 @@ private:
     QTimer *m_refreshTimer;
     SensorData m_pending;
     bool m_dirty = true;
-    int m_statusTick = 0;
+    int m_statusTick = 4;   // so the very first refresh also fills the status line
     RobotId m_currentId;
 };

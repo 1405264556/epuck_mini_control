@@ -7,6 +7,14 @@
 #include <QDateTime>
 
 namespace {
+// A link that has delivered telemetry and then misses this many polls in a row
+// (about 5-6 s) is treated as lost so the manager can reconnect it.
+constexpr int kLinkLostTimeouts = 8;
+// A device that never answered telemetry stays connected (motors and LEDs still
+// work) but is polled slowly to keep the port quiet.
+constexpr int kSilentDeviceTimeouts = 6;
+constexpr int kSilentDevicePollMs = 1000;
+
 void configurePort(QSerialPort *port, const QString &portName, int baudRate) {
     port->setPortName(portName);
     port->setBaudRate(baudRate);
@@ -185,7 +193,7 @@ void SerialPortWorker::onReadyRead() {
         SensorData sample;
         sample.timestamp = QDateTime::currentMSecsSinceEpoch();
         const bool verified = m_binaryHandshake
-            ? m_readBuffer.size() == 28 && EpuckSerComProtocol::parseSensorResponse(m_readBuffer, sample)
+            ? m_readBuffer.size() >= 28 && EpuckSerComProtocol::parseSensorResponse(m_readBuffer.left(28), sample)
             : EpuckSerComProtocol::parseAsciiResponse(m_readBuffer, sample) && sample.has(SensorData::Selector);
         if (verified) { m_initialSensorData = sample; configureRobot(); }
         if (m_readBuffer.size() > 4096) m_readBuffer.clear();
@@ -249,7 +257,13 @@ void SerialPortWorker::processBuffer() {
             ? EpuckSerComProtocol::parseTelemetryResponse(frame, data)
             : EpuckSerComProtocol::parseSensorResponse(frame, data);
         if (parsed) {
+            if (m_sensorTimeouts > 0 || m_telemetryDegraded) {
+                emit telemetryStatus(m_id, "遥测已恢复");
+                if (m_telemetryDegraded && m_pollEnabled) m_pollTimer->start(m_pollIntervalMs);
+                m_telemetryDegraded = false;
+            }
             m_sensorTimeouts = 0;
+            ++m_framesReceived;
             if (!m_hasFilteredProximity) {
                 m_filteredProximity = data.proximity;
                 m_hasFilteredProximity = true;
@@ -291,17 +305,33 @@ void SerialPortWorker::finishCamera() {
     m_capturingImage = false;
     m_cameraBuffer.clear();
     m_cameraExpectedSize = 0;
-    if (m_pollEnabled) m_pollTimer->start(m_pollIntervalMs);
+    if (m_pollEnabled) m_pollTimer->start(m_telemetryDegraded ? kSilentDevicePollMs : m_pollIntervalMs);
 }
 
-void SerialPortWorker::recoverTransaction(const QString &reason) {
+void SerialPortWorker::recoverTransaction(const QString &reason, bool announce) {
     m_awaitingSensorFrame = false;
     finishCamera();
     m_recovering = true;
     m_recoveryTimer.restart();
     m_readBuffer.clear();
     m_port->clear(QSerialPort::Input);
-    emit telemetryStatus(m_id, reason);
+    if (announce) emit telemetryStatus(m_id, reason);
+}
+
+void SerialPortWorker::declareLinkLost(const QString &reason) {
+    stopSensorPolling();
+    m_healthTimer->stop();
+    m_motorScheduler->cancel();
+    m_connected = false;
+    m_awaitingSensorFrame = false;
+    m_capturingImage = false;
+    if (m_port->isOpen()) {
+        // Best effort: if the link is only half dead this still stops the wheels.
+        m_port->write(EpuckSerComProtocol::buildMotorCommand(0, 0));
+        m_port->flush();
+        m_port->close();
+    }
+    reportClosed(reason);
 }
 
 void SerialPortWorker::checkTimeouts() {
@@ -317,13 +347,27 @@ void SerialPortWorker::checkTimeouts() {
         ++m_sensorTimeouts;
         if (m_extendedPolling && m_sensorTimeouts >= 2 && m_readBuffer.size() == 28) {
             m_extendedPolling = false;
+            m_sensorTimeouts = 0;
             emit telemetryStatus(m_id, "固件仅响应基础传感器，已切换兼容轮询");
+            recoverTransaction({}, false);
+        } else if (m_framesReceived > 0 && m_sensorTimeouts >= kLinkLostTimeouts) {
+            declareLinkLost(QString("%1 连续 %2 次未收到遥测，链路已中断")
+                                .arg(m_portName).arg(m_sensorTimeouts));
+            return;
+        } else {
+            if (m_framesReceived == 0 && m_sensorTimeouts == kSilentDeviceTimeouts
+                && !m_telemetryDegraded) {
+                m_telemetryDegraded = true;
+                if (m_pollEnabled) m_pollTimer->start(kSilentDevicePollMs);
+                emit telemetryStatus(m_id, "固件未返回遥测，已降低轮询频率；电机和 LED 控制仍可用");
+            }
+            // Only the first miss of a streak is announced; repeats would flood the UI.
+            recoverTransaction("传感器接收超时，正在重新同步", m_sensorTimeouts == 1);
         }
-        recoverTransaction("传感器接收超时，正在重新同步");
     }
     if (m_recovering && m_recoveryTimer.elapsed() >= 180) {
         m_recovering = false;
-        if (m_pollEnabled) pollSensors();
+        if (m_pollEnabled && !m_telemetryDegraded) pollSensors();
     }
 }
 

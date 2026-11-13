@@ -16,6 +16,7 @@
 #include <QSerialPortInfo>
 #include <QSet>
 #include <QThread>
+#include <QTimer>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -125,17 +126,62 @@ SerialManager::~SerialManager() {
     m_scanPool.clear();
     m_scanPool.waitForDone(1600);
 
+    m_reconnects.clear();
     const auto contexts = m_contexts;
     m_contexts.clear();
+    // Ask every worker to stop first, then wait for all of them against one shared
+    // deadline. A worker stuck inside a blocking Bluetooth open() must not be able
+    // to hang application exit, so nothing here waits without a bound.
     for (const auto &ctx : contexts) {
         if (!ctx.thread || !ctx.worker) continue;
         disconnect(ctx.worker, nullptr, this, nullptr);
-        if (ctx.thread->isRunning()) {
-            QMetaObject::invokeMethod(ctx.worker, &SerialPortWorker::closePort,
-                                      Qt::BlockingQueuedConnection);
-            ctx.thread->quit();
-            ctx.thread->wait(1200);
+        if (!ctx.thread->isRunning()) continue;
+        // quit() is issued from inside the worker thread, after closePort() has run.
+        // Calling it from here right after queuing closePort() lets the event loop
+        // exit before dispatching it, and the final motor stop would never be sent.
+        QPointer<SerialPortWorker> worker(ctx.worker);
+        QThread *thread = ctx.thread;
+        QMetaObject::invokeMethod(ctx.worker, [worker, thread]() {
+            if (worker) worker->closePort();
+            thread->quit();
+        }, Qt::QueuedConnection);
+    }
+    QElapsedTimer deadline;
+    deadline.start();
+    for (const auto &ctx : contexts) {
+        if (!ctx.thread || !ctx.thread->isRunning()) continue;
+        const int remaining = qMax(1, 2000 - static_cast<int>(deadline.elapsed()));
+        if (!ctx.thread->wait(remaining)) {
+            qCWarning(logSerial) << "Serial thread for" << ctx.portName
+                                 << "did not stop in time; leaving it to process exit";
         }
+    }
+}
+
+void SerialManager::setAutoReconnect(bool enabled, int maxAttempts) {
+    m_autoReconnect = enabled;
+    m_maxReconnectAttempts = qBound(1, maxAttempts, 10);
+    if (enabled) return;
+    // Turning it off also withdraws retries that are already waiting.
+    const auto pending = m_reconnects.keys();
+    m_reconnects.clear();
+    for (const auto &id : pending) {
+        if (m_contexts.contains(id)) continue;   // an attempt is in flight; it ends on its own
+        if (auto *robot = m_robotManager->robot(id)) {
+            robot->setConnectionState(RobotConnectionState::Error);
+        }
+        emit robotDisconnected(id);
+    }
+}
+
+void SerialManager::rememberPort(const QString &portName, int baudRate) {
+    if (!portName.isEmpty() && baudRate > 0) m_knownBaudRates[portName] = baudRate;
+}
+
+void SerialManager::setDefaultPollInterval(int intervalMs) {
+    m_pollIntervalMs = qBound(40, intervalMs, 1000);
+    for (auto it = m_contexts.cbegin(); it != m_contexts.cend(); ++it) {
+        if (it->connected) startSensorPolling(it.key(), m_pollIntervalMs);
     }
 }
 
@@ -324,6 +370,9 @@ bool SerialManager::connectToPort(const QString &portName, const RobotId &id, in
         auto it = m_contexts.find(robotId);
         if (it == m_contexts.end() || it->worker != worker || it->closing) return;
         it->connected = true;
+        const bool recovered = m_reconnects.remove(robotId) > 0;
+        if (m_pollIntervalMs != 60) startSensorPolling(robotId, m_pollIntervalMs);
+        if (recovered) emit telemetryStatus(robotId, "已自动重新连接");
         if (auto *robot = m_robotManager->robot(robotId)) {
             robot->setConnectionState(RobotConnectionState::Connected);
         }
@@ -348,8 +397,18 @@ bool SerialManager::connectToPort(const QString &portName, const RobotId &id, in
 }
 
 void SerialManager::disconnectRobot(const RobotId &id) {
+    const bool cancelledReconnect = m_reconnects.remove(id) > 0;
     auto it = m_contexts.find(id);
-    if (it == m_contexts.end() || !it->worker) return;
+    if (it == m_contexts.end() || !it->worker) {
+        // Waiting between reconnect attempts: there is no worker, only the pending retry.
+        if (cancelledReconnect) {
+            if (auto *robot = m_robotManager->robot(id)) {
+                robot->setConnectionState(RobotConnectionState::Disconnected);
+            }
+            emit robotDisconnected(id);
+        }
+        return;
+    }
     it->closing = true;
     it->connected = false;
     if (auto *robot = m_robotManager->robot(id)) {
@@ -363,19 +422,76 @@ void SerialManager::handleWorkerClosed(const RobotId &id, const QString &reason)
     if (it == m_contexts.end()) return;
 
     QThread *thread = it->thread;
+    const QString portName = it->portName;
+    const int baudRate = it->baudRate;
+    const bool wasConnected = it->connected;
+    const bool userClosing = it->closing;
     m_contexts.erase(it);
     if (thread) thread->quit();
-
-    if (!m_shuttingDown) {
-        if (auto *robot = m_robotManager->robot(id)) {
-            robot->setConnectionState(reason.isEmpty()
-                ? RobotConnectionState::Disconnected
-                : RobotConnectionState::Error);
-        }
-        if (!reason.isEmpty()) emit errorOccurred(id, reason);
-        emit robotDisconnected(id);
-    }
     qCInfo(logSerial) << "Serial worker stopped for" << id << reason;
+    if (m_shuttingDown) return;
+
+    // Retry only links that were established (or are already being retried) and
+    // that the user did not close. A first connection that never came up is
+    // reported as a plain failure.
+    const bool unexpected = !reason.isEmpty() && !userClosing;
+    if (unexpected && m_autoReconnect && (wasConnected || m_reconnects.contains(id))
+        && scheduleReconnect(id, portName, baudRate, reason)) {
+        return;
+    }
+
+    const bool gaveUp = m_reconnects.remove(id) > 0;
+    if (auto *robot = m_robotManager->robot(id)) {
+        robot->setConnectionState(reason.isEmpty()
+            ? RobotConnectionState::Disconnected
+            : RobotConnectionState::Error);
+    }
+    if (!reason.isEmpty()) {
+        emit errorOccurred(id, gaveUp
+            ? QString("自动重连 %1 次均失败：%2").arg(m_maxReconnectAttempts).arg(reason)
+            : reason);
+    }
+    emit robotDisconnected(id);
+}
+
+bool SerialManager::scheduleReconnect(const RobotId &id, const QString &portName, int baudRate,
+                                      const QString &reason) {
+    ReconnectState state = m_reconnects.value(id);
+    if (state.attempt >= m_maxReconnectAttempts) return false;
+    state.portName = portName;
+    state.baudRate = baudRate;
+    ++state.attempt;
+    state.generation = ++m_reconnectGeneration;
+    m_reconnects.insert(id, state);
+
+    // 1 s, 2 s, 4 s ... capped: Bluetooth SPP ports need a moment before reopening.
+    const int delayMs = qMin(8000, 1000 << (state.attempt - 1));
+    if (auto *robot = m_robotManager->robot(id)) {
+        // Leaving Connected stops coordination and zeroes the recorded command.
+        robot->setConnectionState(RobotConnectionState::Connecting);
+    }
+    qCWarning(logSerial) << "Link lost for" << id << reason << "- retry" << state.attempt
+                         << "of" << m_maxReconnectAttempts << "in" << delayMs << "ms";
+    emit robotReconnecting(id, state.attempt, m_maxReconnectAttempts, delayMs);
+    emit telemetryStatus(id, QString("连接中断，%1 秒后自动重连（第 %2/%3 次）")
+                                 .arg(delayMs / 1000.0, 0, 'f', 0)
+                                 .arg(state.attempt).arg(m_maxReconnectAttempts));
+
+    const int generation = state.generation;
+    QTimer::singleShot(delayMs, this, [this, id, generation]() {
+        const auto pending = m_reconnects.constFind(id);
+        // Cancelled by the user, superseded, or already reconnected by hand.
+        if (m_shuttingDown || pending == m_reconnects.cend()
+            || pending->generation != generation || m_contexts.contains(id)) return;
+        if (!connectToPort(pending->portName, id, pending->baudRate)) {
+            m_reconnects.remove(id);
+            if (auto *robot = m_robotManager->robot(id)) {
+                robot->setConnectionState(RobotConnectionState::Error);
+            }
+            emit robotDisconnected(id);
+        }
+    });
+    return true;
 }
 
 bool SerialManager::isRobotConnected(const RobotId &id) const {
@@ -386,6 +502,10 @@ bool SerialManager::isRobotConnected(const RobotId &id) const {
 bool SerialManager::isPortActive(const QString &portName) const {
     for (const auto &context : m_contexts) {
         if (context.portName.compare(portName, Qt::CaseInsensitive) == 0) return true;
+    }
+    // A port waiting for its next reconnect attempt must not be probed by a scan.
+    for (const auto &pending : m_reconnects) {
+        if (pending.portName.compare(portName, Qt::CaseInsensitive) == 0) return true;
     }
     return false;
 }

@@ -24,6 +24,14 @@ QVariant RobotListModel::data(const QModelIndex &index, int role) const {
     case StateRole: return static_cast<int>(r->state());
     case BatteryRole: return r->latestSensorData().batteryVoltage;
     case RSSIRole: return r->deviceInfo().rssi;
+    case PortRole: return r->deviceInfo().portName;
+    case DetailRole: {
+        const QString note = m_notes.value(id);
+        return note.isEmpty() ? stateText(r->state()) : note;
+    }
+    case Qt::ToolTipRole:
+        return QString("%1\n端口 %2 · %3 baud").arg(r->name(), r->deviceInfo().portName)
+            .arg(r->deviceInfo().baudRate);
     default: return {};
     }
 }
@@ -43,11 +51,32 @@ void RobotListModel::onRobotRemoved(const RobotId &id) {
     if (row >= 0) {
         beginRemoveRows({}, row, row);
         m_robotIds.removeAt(row);
+        m_notes.remove(id);
         endRemoveRows();
     }
 }
 
-void RobotListModel::onRobotStateChanged(const RobotId &id, RobotConnectionState) {
+QString RobotListModel::stateText(RobotConnectionState state) {
+    switch (state) {
+    case RobotConnectionState::Connected: return "已连接";
+    case RobotConnectionState::Connecting: return "连接中…";
+    case RobotConnectionState::Disconnecting: return "断开中…";
+    case RobotConnectionState::Error: return "连接失败";
+    case RobotConnectionState::Disconnected: return "未连接";
+    }
+    return {};
+}
+
+void RobotListModel::setNote(const RobotId &id, const QString &note) {
+    if (m_notes.value(id) == note) return;
+    if (note.isEmpty()) m_notes.remove(id); else m_notes[id] = note;
+    const int row = m_robotIds.indexOf(id);
+    if (row >= 0) emit dataChanged(index(row), index(row));
+}
+
+void RobotListModel::onRobotStateChanged(const RobotId &id, RobotConnectionState state) {
+    // A note describes a transient phase; any settled state replaces it.
+    if (state != RobotConnectionState::Connecting) m_notes.remove(id);
     int row = m_robotIds.indexOf(id);
     if (row >= 0) emit dataChanged(index(row), index(row));
 }

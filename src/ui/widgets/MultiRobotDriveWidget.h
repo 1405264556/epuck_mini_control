@@ -18,6 +18,9 @@ public:
     explicit MultiRobotDriveWidget(RobotManager *robotManager, MultiRobotCoordinator *coordinator, QWidget *parent = nullptr);
     QList<RobotId> selectedRobotIds() const;
     void stopManualControl();
+    // Keyboard drive for the sync group: forward/turn in [-1, 1], zero releases.
+    void driveGroupNormalized(double forward, double turn);
+    bool isHolding() const { return !m_heldTargets.isEmpty(); }
 protected:
     void hideEvent(QHideEvent *event) override;
 
@@ -32,6 +35,7 @@ private:
     void refreshRows();
     void dispatch(const QMap<RobotId, WheelSpeeds> &commands);
     void sendGroupMotion(int linear, int turn);
+    void releaseHeld();
     void sendWheelValues(const RobotId &id, int left, int right);
     QString stateText(RobotConnectionState state) const;
 

@@ -45,7 +45,8 @@ private:
     void reportClosed(const QString &reason);
     void checkTimeouts();
     void finishCamera();
-    void recoverTransaction(const QString &reason);
+    void recoverTransaction(const QString &reason, bool announce = true);
+    void declareLinkLost(const QString &reason);
 
     RobotId m_id;
     QString m_portName;
@@ -71,6 +72,8 @@ private:
     bool m_recovering = false;
     bool m_extendedPolling = true;
     int m_sensorTimeouts = 0;
+    quint64 m_framesReceived = 0;
+    bool m_telemetryDegraded = false;
     int m_expectedSensorBytes = 44;
     QElapsedTimer m_cameraTimer;
     QElapsedTimer m_lastMotorTimer;

@@ -31,6 +31,9 @@ public:
     QVector<Vec2> virtualObstacles() const { return m_virtualObstacles; }
     void setCoordinateRange(double xMin, double xMax, double yMin, double yMax);
     void fitAllRobots();
+    // Dragging a robot rewrites its map pose; block it while an algorithm is using that pose.
+    void setRobotDragEnabled(bool enabled) { m_robotDragEnabled = enabled; }
+    void setSelectedRobot(const RobotId &id);
 
 public slots:
     void onRobotSensorDataUpdated(const RobotId &id, const SensorData &data);
@@ -43,6 +46,8 @@ signals:
     void goalPointSelected(const Vec2 &pos);
     void virtualObstaclesChanged(const QVector<Vec2> &obstacles);
     void canvasContextMenuRequested(const QPointF &scenePos);
+    void cursorMoved(const Vec2 &pos);
+    void cursorLeft();
 
 protected:
     void drawBackground(QPainter *painter, const QRectF &rect) override;
@@ -50,6 +55,8 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
+    void leaveEvent(QEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
 
 private:
@@ -71,5 +78,14 @@ private:
     bool m_goalPickMode = false;
     bool m_obstacleEditMode = false;
     bool m_dragging = false;
+    bool m_dragArmed = false;
+    bool m_panning = false;
+    bool m_robotDragEnabled = true;
+    QPoint m_pressPos;
+    QPoint m_lastPanPos;
     RobotId m_dragRobotId;
+    RobotId m_selectedId;
+    QMap<RobotId, QGraphicsEllipseItem *> m_selectionRings;
+    int m_nextColor = 0;
+    void applyIdleCursor();
 };

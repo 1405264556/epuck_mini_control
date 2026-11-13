@@ -11,9 +11,14 @@ set(TEST_SOURCES
     test_serial_protocol.cpp
     test_control_runtime.cpp
     test_workstation_ui.cpp
+    test_interaction.cpp
+    test_serial_link.cpp
+    test_screens.cpp
+    FakeEpuck.h
 )
 
 add_executable(epuck_tests ${TEST_SOURCES} ../resources/resources.qrc)
+set_target_properties(epuck_tests PROPERTIES AUTOMOC ON)
 
 target_link_libraries(epuck_tests PRIVATE
     GTest::gtest GTest::gtest_main
@@ -33,4 +38,8 @@ execute_process(COMMAND "${QT_QMAKE_EXECUTABLE}" -query QT_INSTALL_PLUGINS
 if(IS_DIRECTORY "${TEST_QT_PLUGIN_DIR}")
     target_compile_definitions(epuck_tests PRIVATE EPUCK_TEST_QT_PLUGIN_DIR="${TEST_QT_PLUGIN_DIR}")
 endif()
-gtest_discover_tests(epuck_tests DISCOVERY_TIMEOUT 30 PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# PRE_TEST: enumerate tests when ctest runs, not as a post-build step. The post-build
+# step starts the GUI test binary without QT_QPA_PLATFORM and fails the whole build
+# on a machine with no usable display plugin.
+gtest_discover_tests(epuck_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30
+    PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

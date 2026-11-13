@@ -1,4 +1,7 @@
 #include "Settings.h"
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 namespace {
     constexpr int DEFAULT_BLE_SCAN_TIMEOUT_MS = 10000;
@@ -14,6 +17,12 @@ namespace {
 Settings::Settings(QObject *parent)
     : QObject(parent)
     , m_settings("EPFL", "e-puckMiniControl")
+{
+}
+
+Settings::Settings(const QString &iniFilePath, QObject *parent)
+    : QObject(parent)
+    , m_settings(iniFilePath, QSettings::IniFormat)
 {
 }
 
@@ -87,4 +96,83 @@ QString Settings::lastFirmwareDirectory() const {
 }
 void Settings::setLastFirmwareDirectory(const QString &dir) {
     m_settings.setValue("general/lastFwDir", dir);
+}
+
+// Connection
+QList<Settings::KnownDevice> Settings::knownDevices() const {
+    // Kept as one JSON string so the value reads the same in the registry and in INI files.
+    QList<KnownDevice> devices;
+    const auto document = QJsonDocument::fromJson(
+        m_settings.value("connection/knownDevices").toString().toUtf8());
+    const QJsonArray stored = document.array();
+    for (const auto &entry : stored) {
+        const QJsonObject object = entry.toObject();
+        KnownDevice device;
+        device.portName = object.value("port").toString();
+        device.name = object.value("name").toString();
+        device.baudRate = object.value("baud").toInt(115200);
+        device.wasConnected = object.value("connected").toBool(false);
+        if (!device.portName.isEmpty()) devices.append(device);
+    }
+    return devices;
+}
+
+void Settings::setKnownDevices(const QList<KnownDevice> &devices) {
+    QJsonArray stored;
+    for (const auto &device : devices) {
+        if (device.portName.isEmpty()) continue;
+        stored.append(QJsonObject{{"port", device.portName}, {"name", device.name},
+                                  {"baud", device.baudRate},
+                                  {"connected", device.wasConnected}});
+    }
+    m_settings.setValue("connection/knownDevices",
+                        QString::fromUtf8(QJsonDocument(stored).toJson(QJsonDocument::Compact)));
+}
+
+bool Settings::autoReconnect() const {
+    return m_settings.value("connection/autoReconnect", true).toBool();
+}
+void Settings::setAutoReconnect(bool enabled) { m_settings.setValue("connection/autoReconnect", enabled); }
+
+int Settings::reconnectAttempts() const {
+    return qBound(1, m_settings.value("connection/reconnectAttempts", 3).toInt(), 10);
+}
+void Settings::setReconnectAttempts(int attempts) {
+    m_settings.setValue("connection/reconnectAttempts", qBound(1, attempts, 10));
+}
+
+bool Settings::autoConnectOnStartup() const {
+    return m_settings.value("connection/autoConnectOnStartup", false).toBool();
+}
+void Settings::setAutoConnectOnStartup(bool enabled) {
+    m_settings.setValue("connection/autoConnectOnStartup", enabled);
+}
+
+int Settings::sensorPollIntervalMs() const {
+    return qBound(40, m_settings.value("connection/sensorPollIntervalMs", 60).toInt(), 1000);
+}
+void Settings::setSensorPollIntervalMs(int ms) {
+    m_settings.setValue("connection/sensorPollIntervalMs", qBound(40, ms, 1000));
+}
+
+// Manual driving
+int Settings::speedLimit() const {
+    return qBound(100, m_settings.value("control/speedLimit", 500).toInt(), 1000);
+}
+void Settings::setSpeedLimit(int stepsPerSecond) {
+    m_settings.setValue("control/speedLimit", qBound(100, stepsPerSecond, 1000));
+}
+
+bool Settings::keyboardDriveEnabled() const {
+    return m_settings.value("control/keyboardDrive", true).toBool();
+}
+void Settings::setKeyboardDriveEnabled(bool enabled) {
+    m_settings.setValue("control/keyboardDrive", enabled);
+}
+
+int Settings::lastControlMode() const {
+    return m_settings.value("general/lastControlMode", 0).toInt() == 1 ? 1 : 0;
+}
+void Settings::setLastControlMode(int mode) {
+    m_settings.setValue("general/lastControlMode", mode == 1 ? 1 : 0);
 }

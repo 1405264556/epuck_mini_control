@@ -1,4 +1,5 @@
 #include "MultiRobotDriveWidget.h"
+#include "ui/Icons.h"
 #include "core/RobotInstance.h"
 #include "core/RobotManager.h"
 #include "control/MultiRobotCoordinator.h"
@@ -29,12 +30,13 @@ MultiRobotDriveWidget::MultiRobotDriveWidget(RobotManager *manager, MultiRobotCo
     controls->setVerticalSpacing(4);
     controls->addWidget(createValueControl("速度", &m_linearSlider, &m_linearSpin, -1000, 1000, 300), 0, 0, 1, 5);
     controls->addWidget(createValueControl("转向", &m_turnSlider, &m_turnSpin, -1000, 1000, 0), 1, 0, 1, 5);
-    const QList<QStyle::StandardPixmap> icons{QStyle::SP_ArrowLeft, QStyle::SP_ArrowUp,
-        QStyle::SP_ArrowDown, QStyle::SP_ArrowRight, QStyle::SP_MediaStop};
-    const QStringList tips{"左转", "前进", "后退", "右转", "停止同步组"};
+    const QList<icons::Glyph> glyphs{icons::Glyph::ArrowLeft, icons::Glyph::ArrowUp,
+        icons::Glyph::ArrowDown, icons::Glyph::ArrowRight, icons::Glyph::Stop};
+    const QStringList tips{"左转（A）", "前进（W）", "后退（S）", "右转（D）", "停止同步组（空格）"};
     for (int i = 0; i < 5; ++i) {
         auto *button = new QPushButton;
-        button->setIcon(style()->standardIcon(icons[i]));
+        button->setIcon(icons::make(glyphs[i], i == 4 ? QColor(icons::kDanger) : QColor(icons::kInk)));
+        button->setFocusPolicy(Qt::NoFocus);
         button->setToolTip(tips[i]);
         button->setAccessibleName(tips[i]);
         button->setMinimumSize(36, 32);
@@ -48,16 +50,12 @@ MultiRobotDriveWidget::MultiRobotDriveWidget(RobotManager *manager, MultiRobotCo
                 const int turn = qMax(100, qAbs(m_turnSpin->value()));
                 sendGroupMotion(i == 1 ? speed : i == 2 ? -speed : 0, i == 0 ? -turn : i == 3 ? turn : 0);
             });
-            connect(button, &QPushButton::released, this, [this]() {
-                QMap<RobotId, WheelSpeeds> stops;
-                for (const auto &id : m_heldTargets) { stops[id] = {}; m_activeCommands.remove(id); }
-                m_heldTargets.clear();
-                dispatch(stops);
-            });
+            connect(button, &QPushButton::released, this, &MultiRobotDriveWidget::releaseHeld);
         }
     }
     auto *apply = new QPushButton("应用到同步组");
-    apply->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
+    apply->setIcon(icons::make(icons::Glyph::Check, Qt::white));
+    apply->setProperty("accent", true);
     apply->setObjectName("applyFleetCommand");
     controls->addWidget(apply, 3, 0, 1, 5);
     connect(apply, &QPushButton::clicked, this, &MultiRobotDriveWidget::sendGroupValues);
@@ -179,7 +177,9 @@ void MultiRobotDriveWidget::rebuildRobotRows() {
         }
         for (int col : {6, 7}) {
             auto *button = new QPushButton;
-            button->setIcon(style()->standardIcon(col == 6 ? QStyle::SP_DialogApplyButton : QStyle::SP_MediaStop));
+            button->setIcon(col == 6 ? icons::make(icons::Glyph::Check, QColor(icons::kAccent))
+                                     : icons::make(icons::Glyph::Stop, QColor(icons::kDanger)));
+            button->setProperty("flat", true);
             button->setToolTip(col == 6 ? "应用该设备轮速" : "停止该设备");
             button->setAccessibleName(button->toolTip());
             m_robotTable->setCellWidget(row, col, button);
@@ -213,8 +213,9 @@ void MultiRobotDriveWidget::refreshRows() {
         const auto &data = r->latestSensorData();
         m_robotTable->item(row, 2)->setText(online && data.timestamp
             ? QString::number(qMax<qint64>(0, now-data.timestamp)) + " ms" : stateText(r->state()));
-        m_robotTable->item(row, 2)->setForeground(online && data.isFresh(SensorData::Proximity, now)
-            ? QColor("#087f72") : QColor("#a85d22"));
+        // Green: live. Amber: connected but stale. Grey: not connected (not a warning).
+        m_robotTable->item(row, 2)->setForeground(!online ? QColor("#93a3aa")
+            : data.isFresh(SensorData::Proximity, now) ? QColor("#066b60") : QColor("#8a5a10"));
         const auto speeds = r->commandedSpeeds();
         m_robotTable->item(row, 5)->setText(QString("%1 / %2").arg(qRound(speeds.left*1000)).arg(qRound(speeds.right*1000)));
     }
@@ -245,6 +246,38 @@ void MultiRobotDriveWidget::sendGroupMotion(int linear, int turn) {
     }
     dispatch(commands);
 }
+void MultiRobotDriveWidget::releaseHeld() {
+    if (m_heldTargets.isEmpty()) return;
+    QMap<RobotId, WheelSpeeds> stops;
+    for (const auto &id : m_heldTargets) { stops[id] = {}; m_activeCommands.remove(id); }
+    m_heldTargets.clear();
+    dispatch(stops);
+}
+
+void MultiRobotDriveWidget::driveGroupNormalized(double forward, double turn) {
+    if (!isVisible()) return;
+    if (forward == 0 && turn == 0) { releaseHeld(); return; }
+    // Same magnitudes as the on-screen direction buttons.
+    const int speed = qAbs(m_linearSpin->value());
+    const int turnSpeed = qMax(100, qAbs(m_turnSpin->value()));
+    if (m_heldTargets.isEmpty()) m_heldTargets = selectedRobotIds();
+    if (m_heldTargets.isEmpty()) return;
+    // Command exactly the robots latched at the first key press. Re-reading the
+    // selection here could start a robot that joined mid-hold, and the release
+    // (which stops only the latched set) would then leave it running.
+    const int linear = qRound(forward * speed), steer = qRound(turn * turnSpeed);
+    const WheelSpeeds speeds{qBound(-1.0, (linear + steer) / 1000.0, 1.0),
+                             qBound(-1.0, (linear - steer) / 1000.0, 1.0)};
+    QMap<RobotId, WheelSpeeds> commands;
+    for (const auto &id : m_heldTargets) {
+        auto *robot = m_robotManager->robot(id);
+        if (!robot || robot->state() != RobotConnectionState::Connected) continue;
+        commands[id] = speeds;
+        m_activeCommands[id] = speeds;
+    }
+    dispatch(commands);
+}
+
 void MultiRobotDriveWidget::stopSelectedRobots() {
     QMap<RobotId, WheelSpeeds> commands;
     for (const auto &id : selectedRobotIds()) { commands[id] = {}; m_activeCommands.remove(id); }

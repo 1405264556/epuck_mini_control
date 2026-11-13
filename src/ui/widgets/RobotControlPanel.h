@@ -21,10 +21,16 @@ public:
     explicit RobotControlPanel(RobotManager *robotMgr, MultiRobotCoordinator *coordinator,
                                QWidget *parent = nullptr);
 
+    int speedLimit() const;
+    bool canKeyboardDrive() const;
+
 public slots:
     void setControlMode(int mode);
     void showCoordinationPage();
     void stopManualControls();
+    // Keyboard drive routed to the page that is showing (single robot or sync group).
+    void keyboardDrive(double forward, double turn);
+    void setSpeedLimit(int stepsPerSecond);
     void setGoalFromCanvas(const Vec2 &pos);
     void setVirtualObstacles(const QVector<Vec2> &obstacles);
 
@@ -33,6 +39,8 @@ signals:
     void obstacleEditRequested();
     void canvasClearRequested();
     void pathPlanned(const RobotId &id, const QVector<Vec2> &path);
+    void speedLimitChanged(int stepsPerSecond);
+    void singleRobotSummaryChanged(const QString &summary);
 
 private slots:
     void onSelectionChanged(const RobotId &id);
@@ -55,11 +63,9 @@ private:
     RobotManager *m_robotManager;
     MultiRobotCoordinator *m_coordinator;
     QStackedWidget *m_modeStack;
-    QTabWidget *m_singleTabs;
     QTabWidget *m_multiTabs;
     MotorControlWidget *m_motorWidget;
     LEDControlWidget *m_ledWidget;
-    QLabel *m_singleSummary;
     QLabel *m_multiSummary;
     QLabel *m_pathStatus;
     QComboBox *m_algorithmCombo;

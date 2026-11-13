@@ -9,6 +9,7 @@ int main(int argc, char **argv) {
     QCoreApplication::addLibraryPath(QStringLiteral(EPUCK_TEST_QT_PLUGIN_DIR));
 #endif
     QApplication app(argc, argv);
+    app.setStyle("Fusion");
 #ifdef Q_OS_WIN
     if (qEnvironmentVariable("QT_QPA_PLATFORM") == "offscreen") {
         const auto fonts = QDir(qEnvironmentVariable("WINDIR", "C:/Windows")).filePath("Fonts/");

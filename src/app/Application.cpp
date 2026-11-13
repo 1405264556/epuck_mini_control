@@ -18,7 +18,9 @@ Application::Application(int &argc, char **argv)
     : QApplication(argc, argv)
 {
     setApplicationName("e-puck Mini Control");
-    setApplicationVersion("0.5.0");
+    setApplicationVersion(EPUCK_VERSION);
+    // Fusion draws the same on every platform, so the style sheet has one base to build on.
+    setStyle("Fusion");
     setOrganizationName("EPFL");
 }
 

@@ -17,7 +17,7 @@ Q_DECLARE_LOGGING_CATEGORY(logSerial)
 struct LogEntry {
     QDateTime timestamp;
     QString category;
-    QtMsgType level;
+    QtMsgType level = QtInfoMsg;
     QString message;
 };
 

@@ -1,4 +1,5 @@
 #include "RobotControlPanel.h"
+#include "ui/Icons.h"
 #include "MotorControlWidget.h"
 #include "LEDControlWidget.h"
 #include "MultiRobotDriveWidget.h"
@@ -49,6 +50,15 @@ RobotControlPanel::RobotControlPanel(RobotManager *robotMgr,
             [this](const RobotId &id, double left, double right) {
         if (m_coordinator) m_coordinator->manualDrive({{id, {left, right}}});
     });
+    // The always-visible stop button also ends path following for this robot.
+    connect(m_motorWidget, &MotorControlWidget::stopClicked, this, [this]() {
+        if (m_coordinator && m_coordinator->isActive()) {
+            m_coordinator->stopAll();
+            m_pathStatus->setText("已停止。");
+        }
+    });
+    connect(m_motorWidget, &MotorControlWidget::speedLimitChanged,
+            this, &RobotControlPanel::speedLimitChanged);
     if (m_coordinator) connect(m_coordinator, &MultiRobotCoordinator::coordinationStarted,
         this, [this]() { m_motorWidget->releaseControl(false); });
     connect(m_robotManager, &RobotManager::selectedRobotChanged,
@@ -67,18 +77,16 @@ QWidget *RobotControlPanel::createSingleRobotPage() {
     auto *page = new QWidget;
     auto *layout = new QVBoxLayout(page);
 
-    layout->setContentsMargins(4, 4, 4, 4);
-    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setContentsMargins(8, 0, 8, 8);
 
-    m_singleSummary = new QLabel("未选择机器人");
-    m_singleSummary->setWordWrap(true);
-    layout->addWidget(m_singleSummary);
-
-    m_singleTabs = new QTabWidget;
+    // The drive widget owns the single row of tabs; LED and path planning join it.
     m_motorWidget = new MotorControlWidget(m_robotManager);
     m_ledWidget = new LEDControlWidget(m_robotManager);
-    m_singleTabs->addTab(m_motorWidget, "驱动");
-    m_singleTabs->addTab(m_ledWidget, "LED 灯");
+    auto *ledScroll = new QScrollArea;
+    ledScroll->setWidgetResizable(true);
+    ledScroll->setFrameShape(QFrame::NoFrame);
+    ledScroll->setWidget(m_ledWidget);
+    m_motorWidget->addExtraTab(ledScroll, "LED 灯");
 
     const double planningRange = 200.0;
     auto *pathTab = new QWidget;
@@ -130,6 +138,11 @@ QWidget *RobotControlPanel::createSingleRobotPage() {
     auto *planBtn = new QPushButton("规划路径");
     m_startPathBtn = new QPushButton("开始跟踪");
     m_startPathBtn->setEnabled(false);
+    m_startPathBtn->setProperty("accent", true);
+    m_startPathBtn->setIcon(icons::make(icons::Glyph::Play, Qt::white));
+    pickGoalBtn->setIcon(icons::make(icons::Glyph::Target));
+    obstacleBtn->setIcon(icons::make(icons::Glyph::Obstacle));
+    planBtn->setIcon(icons::make(icons::Glyph::Route));
     pathBtns->addWidget(pickGoalBtn, 0, 0);
     pathBtns->addWidget(obstacleBtn, 0, 1);
     pathBtns->addWidget(planBtn, 1, 0);
@@ -141,6 +154,10 @@ QWidget *RobotControlPanel::createSingleRobotPage() {
     auto *resumeBtn = new QPushButton("继续");
     auto *returnBtn = new QPushButton("回原点");
     auto *clearBtn = new QPushButton("清理画布");
+    pauseBtn->setIcon(icons::make(icons::Glyph::Pause));
+    resumeBtn->setIcon(icons::make(icons::Glyph::Play));
+    returnBtn->setIcon(icons::make(icons::Glyph::Home));
+    clearBtn->setIcon(icons::make(icons::Glyph::Trash));
     runBtns->addWidget(pauseBtn, 0, 0);
     runBtns->addWidget(resumeBtn, 0, 1);
     runBtns->addWidget(returnBtn, 1, 0);
@@ -148,6 +165,7 @@ QWidget *RobotControlPanel::createSingleRobotPage() {
     pathLayout->addLayout(runBtns);
 
     m_pathStatus = new QLabel("未规划路径");
+    m_pathStatus->setObjectName("hintLabel");
     m_pathStatus->setWordWrap(true);
     pathLayout->addWidget(m_pathStatus);
     pathLayout->addStretch();
@@ -168,22 +186,19 @@ QWidget *RobotControlPanel::createSingleRobotPage() {
     pathScroll->setWidgetResizable(true);
     pathScroll->setFrameShape(QFrame::NoFrame);
     pathScroll->setWidget(pathTab);
-    m_singleTabs->addTab(pathScroll, "路径规划");
+    m_motorWidget->addExtraTab(pathScroll, "路径规划");
 
-    layout->addWidget(m_singleTabs);
-    auto *scroll = new QScrollArea;
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setWidget(page);
-    return scroll;
+    layout->addWidget(m_motorWidget);
+    return page;
 }
 
 QWidget *RobotControlPanel::createMultiRobotPage() {
     auto *page = new QWidget;
     auto *layout = new QVBoxLayout(page);
-    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setContentsMargins(8, 4, 8, 8);
 
     m_multiSummary = new QLabel;
+    m_multiSummary->setObjectName("sectionLabel");
     m_multiSummary->setWordWrap(true);
     layout->addWidget(m_multiSummary);
 
@@ -269,6 +284,11 @@ QWidget *RobotControlPanel::createMultiRobotPage() {
     auto *pauseBtn = new QPushButton("暂停");
     auto *resumeBtn = new QPushButton("继续");
     auto *stopBtn = new QPushButton("停止协同");
+    startFormationBtn->setProperty("accent", true);
+    startFormationBtn->setIcon(icons::make(icons::Glyph::Play, Qt::white));
+    pauseBtn->setIcon(icons::make(icons::Glyph::Pause));
+    resumeBtn->setIcon(icons::make(icons::Glyph::Play));
+    stopBtn->setIcon(icons::make(icons::Glyph::Stop, QColor(icons::kDanger)));
     btnRow->addWidget(startFormationBtn);
     btnRow->addWidget(pauseBtn);
     btnRow->addWidget(resumeBtn);
@@ -313,9 +333,12 @@ void RobotControlPanel::refreshRobotSummary() {
     if (selected) {
         const QString state = selected->state() == RobotConnectionState::Connected
             ? "已连接" : "未连接";
-        m_singleSummary->setText(QString("当前机器人：%1（%2）").arg(selected->name(), state));
+        const QString port = selected->deviceInfo().portName;
+        emit singleRobotSummaryChanged(selected->name() == port
+            ? QString("%1 · %2").arg(port, state)
+            : QString("%1 · %2 · %3").arg(selected->name(), port, state));
     } else {
-        m_singleSummary->setText("未选择机器人");
+        emit singleRobotSummaryChanged("未选择机器人");
     }
 
     const auto ids = connectedRobotIds();
@@ -474,6 +497,23 @@ void RobotControlPanel::setControlMode(int mode) {
 }
 
 void RobotControlPanel::showCoordinationPage() { m_multiTabs->setCurrentIndex(1); }
+
+int RobotControlPanel::speedLimit() const { return m_motorWidget->speedLimit(); }
+void RobotControlPanel::setSpeedLimit(int stepsPerSecond) { m_motorWidget->setSpeedLimit(stepsPerSecond); }
+
+bool RobotControlPanel::canKeyboardDrive() const {
+    // Single mode: only while the drive tab is in front, so keys never move a
+    // robot whose controls are not on screen.
+    if (m_modeStack->currentIndex() == 0) return m_motorWidget->isJoystickTabActive();
+    return m_multiTabs->currentIndex() == 0;
+}
+
+void RobotControlPanel::keyboardDrive(double forward, double turn) {
+    const bool release = forward == 0 && turn == 0;
+    if (!release && !canKeyboardDrive()) return;
+    if (m_modeStack->currentIndex() == 0) m_motorWidget->driveNormalized(forward, turn);
+    else m_multiDriveWidget->driveGroupNormalized(forward, turn);
+}
 void RobotControlPanel::stopManualControls() {
     m_motorWidget->releaseControl();
     m_multiDriveWidget->stopManualControl();

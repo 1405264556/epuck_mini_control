@@ -4,11 +4,14 @@
 #include <QSettings>
 #include <QString>
 #include <QByteArray>
+#include <QList>
 
 class Settings : public QObject {
     Q_OBJECT
 public:
     explicit Settings(QObject *parent = nullptr);
+    // Stores everything in the given INI file instead of the per-user location.
+    explicit Settings(const QString &iniFilePath, QObject *parent = nullptr);
 
     // BLE
     int bleScanTimeoutMs() const;
@@ -41,6 +44,32 @@ public:
     void setMainWindowGeometry(const QByteArray &geo);
     QByteArray mainWindowState() const;
     void setMainWindowState(const QByteArray &state);
+
+    // Connection
+    struct KnownDevice {
+        QString portName;
+        QString name;
+        int baudRate = 115200;
+        bool wasConnected = false;   // linked when last saved; used for auto-connect
+    };
+    QList<KnownDevice> knownDevices() const;
+    void setKnownDevices(const QList<KnownDevice> &devices);
+    bool autoReconnect() const;
+    void setAutoReconnect(bool enabled);
+    int reconnectAttempts() const;
+    void setReconnectAttempts(int attempts);
+    bool autoConnectOnStartup() const;
+    void setAutoConnectOnStartup(bool enabled);
+    int sensorPollIntervalMs() const;
+    void setSensorPollIntervalMs(int ms);
+
+    // Manual driving
+    int speedLimit() const;            // steps/s, 100..1000
+    void setSpeedLimit(int stepsPerSecond);
+    bool keyboardDriveEnabled() const;
+    void setKeyboardDriveEnabled(bool enabled);
+    int lastControlMode() const;
+    void setLastControlMode(int mode);
 
     // General
     QString lastFirmwareDirectory() const;

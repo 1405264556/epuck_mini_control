@@ -12,6 +12,8 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QScrollBar>
+#include <QApplication>
 #include <QWheelEvent>
 #include <QtMath>
 
@@ -20,18 +22,28 @@ CoordinationCanvas::CoordinationCanvas(RobotManager *robotMgr, QWidget *parent)
     , m_robotManager(robotMgr)
 {
     m_scene = new QGraphicsScene(this);
-    m_scene->setSceneRect(-DEFAULT_RANGE, -DEFAULT_RANGE, DEFAULT_RANGE * 2, DEFAULT_RANGE * 2);
+    // A margin around the ±200 cm working area leaves room to pan past the edge.
+    constexpr double margin = 60.0;
+    m_scene->setSceneRect(-DEFAULT_RANGE - margin, -DEFAULT_RANGE - margin,
+                          (DEFAULT_RANGE + margin) * 2, (DEFAULT_RANGE + margin) * 2);
     setScene(m_scene);
     setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
     setDragMode(QGraphicsView::NoDrag);
     setViewportUpdateMode(QGraphicsView::SmartViewportUpdate);
     setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
     setResizeAnchor(QGraphicsView::AnchorViewCenter);
+    // Panning is done by dragging; permanent scroll bars only cost map area.
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setFrameShape(QFrame::NoFrame);
+    setMouseTracking(true);
+    setToolTip("滚轮缩放 · 拖动空白处平移 · 双击适应全部 · 拖动机器人设定地图位姿");
+    setToolTipDuration(4000);
 
     connect(m_robotManager, &RobotManager::robotAdded, this, &CoordinationCanvas::onRobotAdded);
     connect(m_robotManager, &RobotManager::robotRemoved, this, &CoordinationCanvas::onRobotRemoved);
-    connect(m_robotManager, &RobotManager::robotSensorDataUpdated,
-            this, &CoordinationCanvas::onRobotSensorDataUpdated);
+    connect(m_robotManager, &RobotManager::selectedRobotChanged,
+            this, &CoordinationCanvas::setSelectedRobot);
     connect(m_robotManager, &RobotManager::robotPoseChanged,
             this, &CoordinationCanvas::updateRobotPose);
     connect(m_robotManager, &RobotManager::robotConnectionStateChanged, this,
@@ -42,13 +54,26 @@ CoordinationCanvas::CoordinationCanvas(RobotManager *robotMgr, QWidget *parent)
     for (auto *robot : m_robotManager->allRobots()) {
         addRobotItem(robot->id());
     }
+    setSelectedRobot(m_robotManager->selectedRobotId());
+    applyIdleCursor();
+}
+
+void CoordinationCanvas::applyIdleCursor() {
+    viewport()->setCursor(m_goalPickMode || m_obstacleEditMode ? Qt::CrossCursor : Qt::ArrowCursor);
+}
+
+void CoordinationCanvas::setSelectedRobot(const RobotId &id) {
+    m_selectedId = id;
+    for (auto it = m_selectionRings.cbegin(); it != m_selectionRings.cend(); ++it) {
+        it.value()->setVisible(it.key() == id);
+    }
 }
 
 void CoordinationCanvas::drawBackground(QPainter *painter, const QRectF &rect) {
     QGraphicsView::drawBackground(painter, rect);
     painter->fillRect(rect, QColor("#fbfcfc"));
 
-    QPen gridPen(QColor("#e5ebed"), 0.5);
+    QPen gridPen(QColor("#e9eef0"), 0);
     painter->setPen(gridPen);
 
     double left = rect.left() - std::fmod(rect.left(), GRID_SPACING);
@@ -58,7 +83,10 @@ void CoordinationCanvas::drawBackground(QPainter *painter, const QRectF &rect) {
     for (double y = top; y < rect.bottom(); y += GRID_SPACING)
         painter->drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y));
 
-    QPen axisPen(QColor("#b3c1c8"), 1.0);
+    painter->setPen(QPen(QColor("#c9d5da"), 0, Qt::DashLine));
+    painter->drawRect(QRectF(-DEFAULT_RANGE, -DEFAULT_RANGE, DEFAULT_RANGE * 2, DEFAULT_RANGE * 2));
+
+    QPen axisPen(QColor("#b3c1c8"), 0);
     painter->setPen(axisPen);
     painter->drawLine(QPointF(0, rect.top()), QPointF(0, rect.bottom()));
     painter->drawLine(QPointF(rect.left(), 0), QPointF(rect.right(), 0));
@@ -99,17 +127,29 @@ void CoordinationCanvas::addRobotItem(const RobotId &id) {
     auto *robot = m_robotManager->robot(id);
     if (!robot) return;
 
-    const QStringList palette{"#087f72", "#b65375", "#3e7aab", "#b28723", "#8b61a4", "#537d42"};
-    QColor color(palette[qHash(id) % palette.size()]);
+    // Assigned in arrival order so neighbouring robots never share a colour
+    // until the palette is exhausted.
+    const QStringList palette{"#087f72", "#c2557a", "#3e7aab", "#c08a1e", "#8b61a4", "#5b8a3a",
+                              "#d0603a", "#2f9bb0"};
+    QColor color(palette[m_nextColor++ % palette.size()]);
 
     auto *body = m_scene->addEllipse(-ROBOT_RADIUS, -ROBOT_RADIUS,
         ROBOT_RADIUS * 2, ROBOT_RADIUS * 2,
         QPen(color, 1.5), QBrush(color.lighter(160)));
     body->setZValue(10);
     body->setData(0, id);
-    body->setFlags(QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemIsMovable);
     body->setCursor(Qt::PointingHandCursor);
     m_robotItems[id] = body;
+
+    auto *ring = new QGraphicsEllipseItem(-ROBOT_RADIUS - 2.5, -ROBOT_RADIUS - 2.5,
+                                          (ROBOT_RADIUS + 2.5) * 2, (ROBOT_RADIUS + 2.5) * 2, body);
+    QPen ringPen(color, 2.0, Qt::DotLine);
+    ringPen.setCosmetic(true);
+    ring->setPen(ringPen);
+    ring->setBrush(Qt::NoBrush);
+    ring->setVisible(id == m_selectedId);
+    ring->setAcceptedMouseButtons(Qt::NoButton);
+    m_selectionRings[id] = ring;
 
     auto *heading = m_scene->addLine(0, 0, ROBOT_RADIUS * 1.5, 0,
         QPen(color.darker(140), 1.5));
@@ -128,6 +168,8 @@ void CoordinationCanvas::addRobotItem(const RobotId &id) {
 
 void CoordinationCanvas::removeRobotItem(const RobotId &id) {
     m_headingItems.remove(id);
+    m_selectionRings.remove(id);   // child of the body item, deleted with it
+    if (m_dragRobotId == id) { m_dragging = m_dragArmed = false; m_dragRobotId.clear(); }
     if (auto *item = m_robotItems.take(id)) {
         m_scene->removeItem(item);
         delete item;
@@ -140,7 +182,6 @@ void CoordinationCanvas::updateRobotPose(const RobotId &id, const Vec2 &pos, dou
     auto *item = m_robotItems.value(id, nullptr);
     if (!item) return;
 
-    const QPointF oldPos = item->pos();
     const QPointF worldPoint(pos.x, -pos.y);
     item->setPos(worldPoint);
     if (auto *headItem = m_headingItems.value(id)) {
@@ -148,18 +189,29 @@ void CoordinationCanvas::updateRobotPose(const RobotId &id, const Vec2 &pos, dou
     }
 
     auto &points = m_trailPoints[id];
-    if (points.isEmpty() || QLineF(points.last(), worldPoint).length() >= 0.3) points.append(worldPoint);
-    else return;
-    if (points.size() > 1200) points.remove(0, points.size()-1200);
-    QPainterPath trail;
-    trail.moveTo(points.first());
-    for (int i = 1; i < points.size(); ++i) trail.lineTo(points[i]);
-    m_trails[id] = trail;
+    if (!points.isEmpty() && QLineF(points.last(), worldPoint).length() < 0.3) return;
+    points.append(worldPoint);
+    auto &trail = m_trails[id];
+    if (points.size() > 1200) {
+        // Trim in blocks so the path is rebuilt once per 200 points, not per point.
+        points.remove(0, 200);
+        trail = QPainterPath();
+        trail.moveTo(points.first());
+        for (int i = 1; i < points.size(); ++i) trail.lineTo(points[i]);
+    } else if (points.size() == 1) {
+        trail = QPainterPath();
+        trail.moveTo(worldPoint);
+    } else {
+        trail.lineTo(worldPoint);
+    }
 
     auto *trailItem = m_trailItems.value(id, nullptr);
     if (!trailItem) {
-        trailItem = m_scene->addPath(trail, QPen(item->pen().color(), 1.0, Qt::SolidLine));
+        QPen trailPen(item->pen().color(), 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        trailPen.setCosmetic(true);
+        trailItem = m_scene->addPath(trail, trailPen);
         trailItem->setZValue(0.5);
+        trailItem->setOpacity(0.75);
         m_trailItems[id] = trailItem;
     } else {
         trailItem->setPath(trail);
@@ -196,8 +248,10 @@ void CoordinationCanvas::showPath(const RobotId &id, const QVector<Vec2> &waypoi
         painterPath.lineTo(waypoints[i].x, -waypoints[i].y);
     }
 
-    auto *pathItem = m_scene->addPath(painterPath,
-        QPen(QColor("#2185b3"), 1.4, Qt::DashLine));
+    // Cosmetic: a fixed 2 px on screen at every zoom level.
+    QPen pathPen(QColor("#2185b3"), 2.0, Qt::DashLine, Qt::RoundCap, Qt::RoundJoin);
+    pathPen.setCosmetic(true);
+    auto *pathItem = m_scene->addPath(painterPath, pathPen);
     pathItem->setZValue(1);
     m_pathItems[id] = pathItem;
 
@@ -230,13 +284,13 @@ void CoordinationCanvas::clearTrail(const RobotId &id) {
 void CoordinationCanvas::setGoalPickMode(bool enabled) {
     m_goalPickMode = enabled;
     if (enabled) m_obstacleEditMode = false;
-    viewport()->setCursor(enabled ? Qt::CrossCursor : Qt::ArrowCursor);
+    applyIdleCursor();
 }
 
 void CoordinationCanvas::setObstacleEditMode(bool enabled) {
     m_obstacleEditMode = enabled;
     if (enabled) m_goalPickMode = false;
-    viewport()->setCursor(enabled ? Qt::CrossCursor : Qt::ArrowCursor);
+    applyIdleCursor();
 }
 
 void CoordinationCanvas::clearCanvasOverlays() {
@@ -271,7 +325,11 @@ void CoordinationCanvas::fitAllRobots() {
     for (auto *item : m_pathItems) bounds = bounds.united(item->sceneBoundingRect());
     for (auto *item : m_obstacleItems) bounds = bounds.united(item->sceneBoundingRect());
     if (!bounds.isEmpty()) fitInView(bounds.adjusted(-40, -40, 40, 40), Qt::KeepAspectRatio);
-    else fitInView(m_scene->sceneRect(), Qt::KeepAspectRatio);
+    else fitInView(QRectF(-DEFAULT_RANGE, -DEFAULT_RANGE, DEFAULT_RANGE * 2, DEFAULT_RANGE * 2),
+                   Qt::KeepAspectRatio);
+    // Never zoom in further than the wheel allows, e.g. for a single robot.
+    const double zoom = transform().m11();
+    if (zoom > 6.0) scale(6.0 / zoom, 6.0 / zoom);
 }
 
 void CoordinationCanvas::onRobotSensorDataUpdated(const RobotId &id, const SensorData &) {
@@ -290,24 +348,29 @@ void CoordinationCanvas::wheelEvent(QWheelEvent *event) {
 }
 
 void CoordinationCanvas::mousePressEvent(QMouseEvent *event) {
-    if (event->button() == Qt::MiddleButton) {
-        setDragMode(QGraphicsView::ScrollHandDrag);
-        QMouseEvent fake(QEvent::MouseButtonPress, event->pos(), Qt::LeftButton,
-                         Qt::LeftButton, event->modifiers());
-        QGraphicsView::mousePressEvent(&fake);
+    const bool picking = m_goalPickMode || m_obstacleEditMode;
+    if (event->button() == Qt::MiddleButton
+        || (event->button() == Qt::LeftButton && !picking && !itemAt(event->pos()))) {
+        // Drag on empty map (or with the middle button anywhere) pans the view.
+        m_panning = true;
+        m_lastPanPos = event->pos();
+        viewport()->setCursor(Qt::ClosedHandCursor);
+        event->accept();
         return;
     }
 
     if (m_goalPickMode && event->button() == Qt::LeftButton) {
         const QPointF scenePos = mapToScene(event->pos());
+        const QPointF clamped(qBound(-DEFAULT_RANGE, scenePos.x(), DEFAULT_RANGE),
+                              qBound(-DEFAULT_RANGE, scenePos.y(), DEFAULT_RANGE));
         if (!m_goalMarker) {
             m_goalMarker = m_scene->addEllipse(-4, -4, 8, 8,
-                QPen(QColor("#f38ba8"), 1.8), QBrush(QColor(243, 139, 168, 90)));
+                QPen(QColor("#d74950"), 1.8), QBrush(QColor(215, 73, 80, 70)));
             m_goalMarker->setZValue(8);
         }
-        m_goalMarker->setPos(scenePos);
+        m_goalMarker->setPos(clamped);
         setGoalPickMode(false);
-        emit goalPointSelected(Vec2(qBound(-200.0, scenePos.x(), 200.0), qBound(-200.0, -scenePos.y(), 200.0)));
+        emit goalPointSelected(Vec2(clamped.x(), -clamped.y()));
         event->accept();
         return;
     }
@@ -318,8 +381,8 @@ void CoordinationCanvas::mousePressEvent(QMouseEvent *event) {
         auto *obstacle = m_scene->addRect(scenePos.x() - size * 0.5,
                                           scenePos.y() - size * 0.5,
                                           size, size,
-                                          QPen(QColor("#f38ba8"), 1.2),
-                                          QBrush(QColor(243, 139, 168, 100)));
+                                          QPen(QColor("#b7791f"), 1.2),
+                                          QBrush(QColor(183, 121, 31, 70)));
         obstacle->setZValue(3);
         m_obstacleItems.append(obstacle);
         m_virtualObstacles.append(Vec2(scenePos.x(), -scenePos.y()));
@@ -332,43 +395,95 @@ void CoordinationCanvas::mousePressEvent(QMouseEvent *event) {
         QGraphicsItem *item = itemAt(event->pos());
         while (item && item->parentItem()) item = item->parentItem();
         if (item && item->zValue() == 10) {
-            emit robotClicked(item->data(0).toString());
-            m_dragging = true;
             m_dragRobotId = item->data(0).toString();
+            emit robotClicked(m_dragRobotId);
+            // Selecting must not move the robot: the pose only follows the mouse
+            // after a deliberate drag past the platform threshold.
+            m_dragArmed = m_robotDragEnabled;
+            m_pressPos = event->pos();
+            event->accept();
+            return;
         }
     }
     QGraphicsView::mousePressEvent(event);
 }
 
 void CoordinationCanvas::mouseMoveEvent(QMouseEvent *event) {
+    const QPointF scenePos = mapToScene(event->pos());
+    emit cursorMoved(Vec2(scenePos.x(), -scenePos.y()));
+
+    if (m_panning) {
+        const QPoint delta = event->pos() - m_lastPanPos;
+        m_lastPanPos = event->pos();
+        horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
+        verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
+        event->accept();
+        return;
+    }
+    if (m_dragArmed && !m_dragging
+        && (event->pos() - m_pressPos).manhattanLength() >= QApplication::startDragDistance()) {
+        m_dragging = true;
+        viewport()->setCursor(Qt::SizeAllCursor);
+    }
     if (m_dragging) {
-        QPointF scenePos = mapToScene(event->pos());
         if (auto *r = m_robotManager->robot(m_dragRobotId)) {
-            r->setPosition(Vec2(scenePos.x(), -scenePos.y()), r->heading());
+            r->setPosition(Vec2(qBound(-DEFAULT_RANGE, scenePos.x(), DEFAULT_RANGE),
+                                qBound(-DEFAULT_RANGE, -scenePos.y(), DEFAULT_RANGE)), r->heading());
         }
+        event->accept();
+        return;
     }
     QGraphicsView::mouseMoveEvent(event);
 }
 
 void CoordinationCanvas::mouseReleaseEvent(QMouseEvent *event) {
-    if (m_dragging) {
-        QPointF scenePos = mapToScene(event->pos());
-        emit robotMoved(m_dragRobotId, Vec2(scenePos.x(), -scenePos.y()));
-        m_dragging = false;
+    if (m_panning && (event->button() == Qt::LeftButton || event->button() == Qt::MiddleButton)) {
+        m_panning = false;
+        applyIdleCursor();
+        event->accept();
+        return;
     }
-    if (event->button() == Qt::MiddleButton)
-        setDragMode(QGraphicsView::NoDrag);
+    if (event->button() == Qt::LeftButton && (m_dragging || m_dragArmed)) {
+        if (m_dragging) {
+            if (auto *r = m_robotManager->robot(m_dragRobotId)) emit robotMoved(m_dragRobotId, r->position());
+        }
+        m_dragging = m_dragArmed = false;
+        applyIdleCursor();
+        event->accept();
+        return;
+    }
     QGraphicsView::mouseReleaseEvent(event);
+}
+
+void CoordinationCanvas::mouseDoubleClickEvent(QMouseEvent *event) {
+    if (event->button() == Qt::LeftButton && !itemAt(event->pos())
+        && !m_goalPickMode && !m_obstacleEditMode) {
+        m_panning = false;
+        applyIdleCursor();
+        fitAllRobots();
+        event->accept();
+        return;
+    }
+    QGraphicsView::mouseDoubleClickEvent(event);
+}
+
+void CoordinationCanvas::leaveEvent(QEvent *event) {
+    emit cursorLeft();
+    QGraphicsView::leaveEvent(event);
 }
 
 void CoordinationCanvas::contextMenuEvent(QContextMenuEvent *event) {
     QGraphicsItem *item = itemAt(event->pos());
     QMenu menu;
+    while (item && item->parentItem()) item = item->parentItem();
     if (item && item->zValue() == 10) {
         RobotId id = item->data(0).toString();
-        menu.addAction("设为领航者", [this, id]() {
-            emit robotClicked(id);
+        menu.addAction("选中此机器人", this, [this, id]() { emit robotClicked(id); });
+        auto *reset = menu.addAction("将地图位姿重置到原点", this, [this, id]() {
+            if (auto *r = m_robotManager->robot(id)) r->setPosition({0, 0}, 0);
+            clearTrail(id);
         });
+        reset->setEnabled(m_robotDragEnabled);
         menu.addSeparator();
     }
     menu.addAction("选择路径目标点", this, [this]() {

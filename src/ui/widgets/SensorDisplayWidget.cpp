@@ -17,6 +17,7 @@
 #include <QHeaderView>
 #include <QTableWidget>
 #include <QSignalBlocker>
+#include <QStyle>
 #include <algorithm>
 
 SensorDisplayWidget::SensorDisplayWidget(RobotManager *robotMgr, QWidget *parent)
@@ -32,6 +33,9 @@ SensorDisplayWidget::SensorDisplayWidget(RobotManager *robotMgr, QWidget *parent
     m_fleetTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_fleetTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_fleetTable->setMaximumHeight(160);
+    m_fleetTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_fleetTable->setAlternatingRowColors(true);
+    m_fleetTable->setShowGrid(false);
     m_fleetTable->hide();
     layout->addWidget(m_fleetTable);
     m_robotCombo = new QComboBox;
@@ -40,7 +44,8 @@ SensorDisplayWidget::SensorDisplayWidget(RobotManager *robotMgr, QWidget *parent
     m_robotCombo->setMinimumContentsLength(10);
     layout->addWidget(m_robotCombo);
     m_status = new QLabel;
-    m_status->setWordWrap(true);
+    m_status->setProperty("chip", true);
+    m_status->setAlignment(Qt::AlignCenter);
     layout->addWidget(m_status);
     m_sensorCombo = new QComboBox;
     m_sensorCombo->addItems({"接近传感器", "加速度 / IMU", "ToF 测距", "麦克风", "摄像头", "数据与时效"});
@@ -48,6 +53,10 @@ SensorDisplayWidget::SensorDisplayWidget(RobotManager *robotMgr, QWidget *parent
     layout->addWidget(m_sensorCombo);
     m_tabWidget = new QTabWidget;
     m_tabWidget->tabBar()->hide();
+    // Without this the tallest page (camera, chart) dictates the dock's minimum
+    // height and squeezes the drive panel on small windows.
+    m_tabWidget->setMinimumHeight(96);
+    m_tabWidget->setDocumentMode(true);
     m_proxVis = new ProximityVisualizer;
     m_imuVis = new IMUVisualizer;
     m_imuVis->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
@@ -64,6 +73,10 @@ SensorDisplayWidget::SensorDisplayWidget(RobotManager *robotMgr, QWidget *parent
     m_values->verticalHeader()->hide();
     m_values->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_values->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_values->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_values->setAlternatingRowColors(true);
+    m_values->setShowGrid(false);
+    m_values->verticalHeader()->setDefaultSectionSize(26);
     m_tabWidget->addTab(m_values, "数据");
     layout->addWidget(m_tabWidget, 1);
     connect(m_sensorCombo, &QComboBox::currentIndexChanged, m_tabWidget, &QTabWidget::setCurrentIndex);
@@ -168,6 +181,12 @@ void SensorDisplayWidget::refreshDisplay() {
     const QString signalState = !m_pending.has(field) ? "未接入"
         : online && m_pending.isFresh(field, now, field == SensorData::Camera ? 2500 : 1000) ? "实时" : "过期";
     m_status->setText(QString("%1 · %2 · 最新反馈 %3").arg(online ? "在线" : "离线", signalState, age));
+    const char *tone = !online ? "" : signalState == "实时" ? "ok" : signalState == "过期" ? "warn" : "";
+    if (m_status->property("tone").toString() != QLatin1String(tone)) {
+        m_status->setProperty("tone", tone);
+        m_status->style()->unpolish(m_status);
+        m_status->style()->polish(m_status);
+    }
     const auto robots = m_robotManager->allRobots();
     m_fleetTable->setRowCount(robots.size());
     for (int row = 0; row < robots.size(); ++row) {
@@ -179,35 +198,52 @@ void SensorDisplayWidget::refreshDisplay() {
             d.timestamp ? QString::number(qMax<qint64>(0, now-d.timestamp)) + " ms" : "--"};
         for (int col = 0; col < 3; ++col) {
             if (!m_fleetTable->item(row, col)) m_fleetTable->setItem(row, col, new QTableWidgetItem);
-            m_fleetTable->item(row, col)->setText(values[col]);
-            m_fleetTable->item(row, col)->setData(Qt::UserRole, r->id());
+            auto *item = m_fleetTable->item(row, col);
+            if (item->text() != values[col]) item->setText(values[col]);
+            item->setData(Qt::UserRole, r->id());
+            if (col == 1) item->setForeground(QColor(!connected ? "#93a3aa"
+                : state == "实时" ? "#066b60" : "#8a5a10"));
         }
     }
     if (m_tabWidget->currentIndex() != 5) return;
-    m_values->setRowCount(0);
+    // Rows are updated in place: rebuilding the table on every refresh would reset
+    // the scroll position and selection four times a second.
+    int row = 0;
     auto add = [&](const QString &name, const QString &value, SensorData::Field field) {
-        const int row = m_values->rowCount(); m_values->insertRow(row);
-        const QString state = !m_pending.has(field) ? "未接入"
-            : !online || !m_pending.isFresh(field, now, field == SensorData::Camera ? 2500 : 1000)
-                ? "过期" : "实时";
-        m_values->setItem(row, 0, new QTableWidgetItem(name));
-        m_values->setItem(row, 1, new QTableWidgetItem(m_pending.has(field) ? value : "--"));
-        m_values->setItem(row, 2, new QTableWidgetItem(state));
+        if (row >= m_values->rowCount()) {
+            m_values->insertRow(row);
+            for (int col = 0; col < 3; ++col) m_values->setItem(row, col, new QTableWidgetItem);
+        }
+        const bool present = m_pending.has(field);
+        const bool fresh = present && online
+            && m_pending.isFresh(field, now, field == SensorData::Camera ? 2500 : 1000);
+        const QString state = !present ? "未接入" : fresh ? "实时" : "过期";
+        const QString texts[3] = {name, present ? value : "--", state};
+        for (int col = 0; col < 3; ++col) {
+            auto *item = m_values->item(row, col);
+            if (item->text() != texts[col]) item->setText(texts[col]);
+        }
+        m_values->item(row, 2)->setForeground(
+            QColor(!present ? "#93a3aa" : fresh ? "#066b60" : "#8a5a10"));
+        m_values->item(row, 1)->setForeground(QColor(present ? "#223139" : "#93a3aa"));
+        ++row;
     };
     for (int i = 0; i < 8; ++i) add(QString("IR %1").arg(i), QString::number(m_pending.proximity[i]), SensorData::Proximity);
-    add("加速度 X", QString::number(m_pending.accelerometer.x, 'f', 1), SensorData::Accelerometer);
-    add("加速度 Y", QString::number(m_pending.accelerometer.y, 'f', 1), SensorData::Accelerometer);
-    add("加速度 Z", QString::number(m_pending.accelerometer.z, 'f', 1), SensorData::Accelerometer);
+    const QString accelUnit = m_pending.accelerometerInADC ? " (ADC)" : " (m/s²)";
+    add("加速度 X" + accelUnit, QString::number(m_pending.accelerometer.x, 'f', 1), SensorData::Accelerometer);
+    add("加速度 Y" + accelUnit, QString::number(m_pending.accelerometer.y, 'f', 1), SensorData::Accelerometer);
+    add("加速度 Z" + accelUnit, QString::number(m_pending.accelerometer.z, 'f', 1), SensorData::Accelerometer);
     add("加速度幅度", QString::number(m_pending.accelMagnitude, 'f', 1), SensorData::AccelSpherical);
     add("方向 (度)", QString::number(m_pending.accelOrientation, 'f', 1), SensorData::AccelSpherical);
     add("倾角 (度)", QString::number(m_pending.accelInclination, 'f', 1), SensorData::AccelSpherical);
     add("陀螺仪 Z", QString::number(m_pending.gyroscope.z, 'f', 1), SensorData::Gyroscope);
-    for (int i = 0; i < m_pending.microphoneChannels; ++i) add(QString("麦克风 %1").arg(i+1),
+    for (int i = 0; i < 3; ++i) add(QString("麦克风 %1").arg(i+1),
         QString::number(m_pending.microphones[i], 'f', 3), SensorData::Microphone);
-    add("左编码器", QString::number(m_pending.encoders[0]), SensorData::Encoders);
-    add("右编码器", QString::number(m_pending.encoders[1]), SensorData::Encoders);
+    add("左编码器 (步)", QString::number(m_pending.encoders[0]), SensorData::Encoders);
+    add("右编码器 (步)", QString::number(m_pending.encoders[1]), SensorData::Encoders);
     add("ToF 最近 (mm)", QString::number(*std::min_element(m_pending.tof.begin(), m_pending.tof.end())), SensorData::ToF);
     add("电量 (%)", QString::number(m_pending.batteryPercent), SensorData::Battery);
     add("Selector", QString::number(m_pending.selectorPosition), SensorData::Selector);
     add("摄像头", QString("%1 × %2").arg(m_pending.cameraFrame.width()).arg(m_pending.cameraFrame.height()), SensorData::Camera);
+    if (m_values->rowCount() > row) m_values->setRowCount(row);
 }

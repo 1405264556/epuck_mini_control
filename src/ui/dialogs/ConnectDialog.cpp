@@ -14,7 +14,7 @@
 ConnectDialog::ConnectDialog(SerialManager *serialMgr, QWidget *parent)
     : QDialog(parent), m_serialManager(serialMgr)
 {
-    setWindowTitle("连接到机器人 (COM 串口)");
+    setWindowTitle("手动连接");
     resize(600, 440);
     auto *layout = new QVBoxLayout(this);
 
@@ -22,7 +22,7 @@ ConnectDialog::ConnectDialog(SerialManager *serialMgr, QWidget *parent)
     auto *manualRow = new QHBoxLayout;
     manualRow->addWidget(new QLabel("手动端口："));
     m_manualPortEdit = new QLineEdit;
-    m_manualPortEdit->setPlaceholderText("如 COM3, COM4, /dev/ttyUSB0");
+    m_manualPortEdit->setPlaceholderText("如 COM5，Linux 下如 /dev/rfcomm0");
     manualRow->addWidget(m_manualPortEdit);
     m_manualConnectBtn = new QPushButton("直接连接此端口");
     manualRow->addWidget(m_manualConnectBtn);
@@ -51,6 +51,16 @@ ConnectDialog::ConnectDialog(SerialManager *serialMgr, QWidget *parent)
     auto *connectBtn = new QPushButton("连接选中设备");
     auto *cancelBtn = new QPushButton("取消");
     connectBtn->setEnabled(false);
+    connectBtn->setProperty("accent", true);
+    m_table->setAlternatingRowColors(true);
+    m_table->setShowGrid(false);
+    m_table->verticalHeader()->hide();
+    m_table->setColumnWidth(0, 250);
+    // Enter in the port field connects to that port instead of closing the dialog.
+    connect(m_manualPortEdit, &QLineEdit::returnPressed, m_manualConnectBtn, &QPushButton::click);
+    m_manualConnectBtn->setAutoDefault(false);
+    m_scanBtn->setAutoDefault(false);
+    cancelBtn->setAutoDefault(false);
     dialogBtns->addStretch();
     dialogBtns->addWidget(connectBtn);
     dialogBtns->addWidget(cancelBtn);
