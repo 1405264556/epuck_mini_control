@@ -67,7 +67,14 @@ jobs:
         shell: pwsh
         run: |
           $mingw = Join-Path $env:IQTA_TOOLS 'mingw1310_64\bin'
-          ./tools/package.ps1 -QtRoot $env:QT_ROOT_DIR -CompilerBin $mingw
+          try {
+            ./tools/package.ps1 -QtRoot $env:QT_ROOT_DIR -CompilerBin $mingw
+          } catch {
+            # Surfaced as an annotation so the cause is visible without opening the log.
+            $where = $_.InvocationInfo.ScriptLineNumber
+            Write-Output "::error title=package.ps1 line $where::$($_.Exception.Message -replace "`r?`n", ' ')"
+            exit 1
+          }
           Get-ChildItem release
       - name: 启动自检
         shell: pwsh

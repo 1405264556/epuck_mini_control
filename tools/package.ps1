@@ -28,13 +28,20 @@ Copy-Item -LiteralPath $launcher.FullName -Destination $output -Force
 Copy-Item -Path (Join-Path $root '*.url') -Destination $output -Force
 New-Item -ItemType Directory -Path (Join-Path $output 'algorithms') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $root 'docs\algorithm_plugins.txt') -Destination (Join-Path $output 'algorithms\README.txt') -Force
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut([IO.Path]::ChangeExtension($launcher.FullName, 'lnk'))
-$shortcut.TargetPath = Join-Path $output 'epuck_mini_control.exe'
-$shortcut.WorkingDirectory = $output
-$shortcut.IconLocation = "$output\epuck_mini_control.exe,0"
-$shortcut.Description = "e-puck Mini Control $version"
-$shortcut.Save()
+# The shortcut is a convenience for the source checkout and is not part of the ZIP.
+# WScript.Shell cannot save a shortcut whose name is outside the system ANSI code
+# page (e.g. a Chinese file name on an English Windows), so failure is not fatal.
+try {
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut([IO.Path]::ChangeExtension($launcher.FullName, 'lnk'))
+    $shortcut.TargetPath = Join-Path $output 'epuck_mini_control.exe'
+    $shortcut.WorkingDirectory = $output
+    $shortcut.IconLocation = "$output\epuck_mini_control.exe,0"
+    $shortcut.Description = "e-puck Mini Control $version"
+    $shortcut.Save()
+} catch {
+    Write-Warning "Shortcut not created: $($_.Exception.Message)"
+}
 $archive = Join-Path $root "release\epuck_mini_control-v$version-win64.zip"
 Compress-Archive -LiteralPath $output -DestinationPath $archive -Force
 Get-FileHash -LiteralPath $archive -Algorithm SHA256 | Format-List
